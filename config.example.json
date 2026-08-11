@@ -1,0 +1,17 @@
+{
+  "template": "RSO Boston",
+  "employeeCode": "Resident",
+  "employeeUser": "YOUR_EMPLOYEE_NUMBER",
+
+  "_comment": "Your standing weekly availability. 'all-day' or 'off'. The web UI does not read this file, only the CLI does.",
+
+  "week": {
+    "sunday": "off",
+    "monday": "off",
+    "tuesday": "all-day",
+    "wednesday": "all-day",
+    "thursday": "all-day",
+    "friday": "off",
+    "saturday": "off"
+  }
+}

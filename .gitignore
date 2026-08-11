@@ -1,0 +1,9 @@
+# Personal. Never commit.
+config.json
+history.jsonl
+board-log.jsonl
+recon-out/
+
+node_modules/
+.DS_Store
+*.log

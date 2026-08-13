@@ -36,6 +36,7 @@ const el = {
   pill: document.getElementById('pill'),
   pillText: document.getElementById('pillText'),
   log: document.getElementById('log'),
+  alerts: document.getElementById('alerts'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -115,6 +116,7 @@ function render() {
   el.days.setAttribute('aria-busy', 'false');
   el.days.replaceChildren(...DAYS.map(buildRow));
   syncFooter();
+  renderAlerts();
 }
 
 function buildRow(day) {
@@ -184,15 +186,18 @@ function syncFooter() {
 /* ---------- upcoming shifts ---------- */
 
 let myShifts = [];
+let shiftsLoaded = false;
 
 function renderShifts(shifts) {
   myShifts = shifts;
+  shiftsLoaded = true;
   if (!shifts.length) {
     el.shifts.hidden = false;
     el.calMonth.textContent = '';
     el.cal.replaceChildren();
     el.agenda.replaceChildren();
     el.shiftsSummary.textContent = 'Nothing scheduled in the next four weeks.';
+    renderAlerts();
     return;
   }
 
@@ -204,6 +209,7 @@ function renderShifts(shifts) {
 
   renderCalendar(shifts);
   renderAgenda(shifts);
+  renderAlerts();
 }
 
 function renderCalendar(shifts) {
@@ -507,7 +513,10 @@ let pollTimer = null;
 function schedulePoll() {
   clearInterval(pollTimer);
   const every = document.visibilityState === 'visible' ? POLL_VISIBLE_MS : POLL_HIDDEN_MS;
-  pollTimer = setInterval(() => checkOpenShifts({ notify: true }), every);
+  pollTimer = setInterval(() => {
+    checkOpenShifts({ notify: true });
+    refreshWeek();
+  }, every);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -519,6 +528,83 @@ document.addEventListener('visibilitychange', () => {
 });
 
 schedulePoll();
+
+
+/* ---------- weekly readiness ---------- */
+
+// You need at least one shift a week to keep the job, and availability has to
+// be re-entered each week. Both are easy to forget and neither is visible
+// anywhere until it is too late.
+
+const WEEK_MS = 604800000;
+
+function weekStartOf(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - d.getDay());
+  return d;
+}
+
+function shiftsInWeek(offset) {
+  const start = weekStartOf(new Date()).getTime() + offset * WEEK_MS;
+  return myShifts.filter((s) => {
+    const w = weekStartOf(new Date(s.start)).getTime();
+    return w === start;
+  });
+}
+
+// Days left until next week starts. Drives how loud the warning gets.
+function daysUntilNextWeek() {
+  const nextWeek = weekStartOf(new Date()).getTime() + WEEK_MS;
+  return Math.ceil((nextWeek - Date.now()) / 86400000);
+}
+
+function readiness() {
+  const alerts = [];
+
+  // Every day off almost certainly means TeamWork reset it and it has not been
+  // filled in yet, rather than a deliberate "I cannot work at all this week".
+  if (live && countOn(live) === 0) {
+    alerts.push({
+      level: 'warn',
+      text: 'Availability is empty. Set your days and save.',
+    });
+  }
+
+  // myShifts is only populated once /api/shifts lands; say nothing until then
+  // rather than flash a false "no shifts" warning on load.
+  if (shiftsLoaded) {
+    const next = shiftsInWeek(1);
+    const days = daysUntilNextWeek();
+    if (!next.length) {
+      alerts.push({
+        level: days <= 2 ? 'bad' : 'warn',
+        text: days <= 2
+          ? `No shifts next week, and it starts in ${days === 1 ? 'a day' : days + ' days'}. You need one.`
+          : 'No shifts booked for next week yet.',
+      });
+    }
+
+    const thisWeek = shiftsInWeek(0);
+    if (!thisWeek.length) {
+      alerts.push({ level: 'bad', text: 'No shifts this week.' });
+    }
+  }
+
+  return alerts;
+}
+
+function renderAlerts() {
+  const alerts = readiness();
+  el.alerts.hidden = alerts.length === 0;
+  el.alerts.replaceChildren(...alerts.map((a) => {
+    const div = document.createElement('div');
+    div.className = `alert ${a.level}`;
+    const dot = document.createElement('i');
+    div.append(dot, document.createTextNode(a.text));
+    return div;
+  }));
+}
 
 /* ---------- history ---------- */
 
@@ -584,6 +670,24 @@ async function load() {
 
   refreshHistory();
   checkOpenShifts();
+}
+
+// The toggles are TeamWork's state, not ours. If TeamWork resets the week
+// while this page is open, the page has to follow. Skipped whenever there are
+// unsaved edits, because clobbering a draft mid-thought is worse than stale.
+async function refreshWeek() {
+  if (busy || !live || isDirty()) return;
+  try {
+    const data = await api('/api/week');
+    verifiedAt = data.at;
+    const changed = DAYS.some((d) => live[d] !== data.week[d]);
+    if (!changed) return void syncFooter();
+    live = data.week;
+    draft = { ...data.week };
+    render();
+  } catch (err) {
+    console.warn('week refresh failed:', err.message);
+  }
 }
 
 function refreshHistory() {
@@ -653,6 +757,7 @@ el.save.addEventListener('click', async () => {
 setInterval(() => {
   if (verifiedAt && !isDirty() && !busy) syncFooter();
   syncChecked();
+  renderAlerts();
 }, 30000);
 
 load();

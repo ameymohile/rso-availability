@@ -50,6 +50,10 @@ Open shifts refresh every minute while the page is open, 150s if the tab is in t
 
 Four week calendar of the shifts I already have, with an agenda next to it.
 
+Warns me when a week has no shift booked, since I need one a week to keep the job, and when availability is sitting empty because TeamWork reset it. Both only show up when there is actually something to do.
+
+The toggles are read live from TeamWork every minute, not cached locally. If TeamWork resets the week while the page is open, the page follows. It skips the refresh while I have unsaved edits so it cannot wipe what I am mid-way through.
+
 Every save that changed something gets appended to `history.jsonl`.
 
 Shortcuts: `⌘S` save, `R` refresh the board, `⌘\` cycle light/dark/auto.

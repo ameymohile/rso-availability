@@ -22,6 +22,8 @@
   --btn-fg: #ffffff;
   --danger: #d70015;
   --focus: #0071e3;
+  --warn: #9a5b00;
+  --warn-bg: rgba(180, 105, 0, 0.09);
 }
 
 :root[data-theme='dark'] {
@@ -38,6 +40,8 @@
   --btn-fg: #141417;
   --danger: #ff453a;
   --focus: #0a84ff;
+  --warn: #ffb340;
+  --warn-bg: rgba(255, 159, 10, 0.11);
 }
 
 /* "Auto" = follow the system, unless light was explicitly chosen. */
@@ -56,6 +60,8 @@
     --btn-fg: #141417;
     --danger: #ff453a;
     --focus: #0a84ff;
+    --warn: #ffb340;
+    --warn-bg: rgba(255, 159, 10, 0.11);
   }
 }
 
@@ -694,3 +700,44 @@ kbd {
   color: var(--faint);
   opacity: 0.75;
 }
+
+/* ---------- readiness alerts ---------- */
+
+/* Present only when there is something to do. An always-on status strip stops
+   being read within a week; one that appears only when it matters keeps its
+   meaning. */
+.alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 22px;
+}
+
+/* A class rule setting display beats the UA [hidden] rule, so it has to be
+   restated or an empty alert box still takes up space. */
+.alerts[hidden] { display: none; }
+
+.alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  font-size: 13.5px;
+  letter-spacing: -0.005em;
+}
+
+.alert i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.alert.warn { background: var(--warn-bg); border-color: transparent; color: var(--warn); }
+.alert.warn i { background: var(--warn); }
+
+/* Reserved for the one that costs the job: a week with no shift at all. */
+.alert.bad { background: var(--warn-bg); border-color: transparent; color: var(--danger); }
+.alert.bad i { background: var(--danger); }

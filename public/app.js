@@ -1,9 +1,4 @@
-// Loads the current week, lets you toggle days, saves, and then reports what
-// TeamWork actually stored -- not what we asked it to store.
-//
-// Upcoming shifts are shown separately and are purely informational. Because
-// availability is submitted fresh each week, an already-booked shift says
-// nothing about the week you are filling in now.
+// The whole UI. Reports what TeamWork stored, never what we asked it to store.
 
 const DAYS = [
   'sunday', 'monday', 'tuesday', 'wednesday',
@@ -60,8 +55,7 @@ const isDirty = () => DAYS.some((d) => live[d] !== draft[d]);
 const countOn = (week) => DAYS.filter((d) => week[d] === 'all-day').length;
 const listDays = (days) => days.map(label).join(', ');
 
-// Local YYYY-MM-DD. Not toISOString(), which shifts to UTC and can land an
-// 8pm Eastern shift on the following day.
+// Local YYYY-MM-DD. toISOString() would push an 8pm shift to the next day.
 const dateKey = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
@@ -77,8 +71,7 @@ const fmtTime = (iso) =>
     .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
     .replace(':00', '');
 
-// Calendar-day difference, not elapsed hours. A shift at 8pm tomorrow reads as
-// "tomorrow" even though it is 26 hours out.
+// Calendar days, not elapsed hours, so 8pm tomorrow reads as "tomorrow".
 function relativeDay(iso) {
   const midnight = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
   const days = Math.round((midnight(iso) - midnight(new Date())) / 86400000);
@@ -99,8 +92,7 @@ function relativeTime(iso) {
   return hours === 1 ? 'an hour ago' : `${hours} hours ago`;
 }
 
-// Lead with what the reader can do about it; keep the raw error underneath as
-// a quiet second line so debugging is still possible without owning the UI.
+// Lead with what to do about it. The raw error stays underneath, quietly.
 function humanize(message) {
   if (/invalid token|401|app\.token|password/i.test(message)) {
     return 'TeamWork signed us out. Try again, and re-check the saved password if it keeps happening.';
@@ -172,8 +164,7 @@ function buildRow(day) {
   wrap.append(input, track);
   row.append(name, state, wrap);
 
-  // Clicking the switch already works via the label; this makes the rest of
-  // the row a target too, which matters far more with a mouse than a thumb.
+  // The whole row is a target, which matters far more with a mouse than a thumb.
   row.addEventListener('click', (event) => {
     if (busy || event.target.closest('.switch')) return;
     input.click();
@@ -187,8 +178,7 @@ function syncFooter() {
   const pending = DAYS.filter((d) => live[d] !== draft[d]).length;
   el.save.className = 'save';
   el.save.disabled = !dirty;
-  // Naming the count turns the button into a confirmation of what you just did,
-  // which matters when the thing being written is your real work schedule.
+  // Naming the count makes the button confirm the scope of a real schedule write.
   el.save.textContent = dirty
     ? `Save ${pending} change${pending === 1 ? '' : 's'}`
     : 'Saved';
@@ -198,8 +188,7 @@ function syncFooter() {
     ? 'Not available any day this week.'
     : `Available ${n} ${n === 1 ? 'day' : 'days'} a week, all day.`;
 
-  // Toggling a day does not rebuild the calendar, so the headers are synced
-  // here instead, where every change already lands.
+  // Toggling does not rebuild the calendar, so sync the headers where changes land.
   syncCalendarHeads();
 
   if (dirty) {
@@ -213,8 +202,7 @@ function syncFooter() {
 /* ---------- upcoming shifts ---------- */
 
 let myShifts = [];
-// Upcoming only drives the agenda. Pay needs the wider set, because a shift you
-// worked on Monday still counts towards this week's money.
+// Pay needs the wider set: a shift worked on Monday still counts this week.
 let allShifts = [];
 let shiftsLoaded = false;
 
@@ -267,8 +255,7 @@ function renderCalendar(shifts) {
     head.className = 'cal-head';
     head.textContent = initial;
     head.setAttribute('aria-hidden', 'true');
-    // Two columns share the letter S and two share T, so give assistive tech
-    // the real name instead of a bare initial.
+    // S and T each appear twice, so give assistive tech the real name.
     head.title = DAYS[i];
     head.dataset.day = DAYS[i];
     return head;
@@ -310,9 +297,8 @@ function renderCalendar(shifts) {
   syncCalendarHeads();
 }
 
-// The calendar columns and the day toggles are the same seven weekdays. Marking
-// the ones you are available for lets you read "I offered Tue/Wed/Thu and the
-// work landed on Sat/Mon" without cross-referencing two panels.
+// Same seven weekdays as the toggles, so marking the offered ones saves
+// cross-referencing two panels.
 function syncCalendarHeads() {
   if (!draft) return;
   for (const head of el.cal.querySelectorAll('.cal-head')) {
@@ -340,8 +326,7 @@ function renderAgenda(shifts) {
       li.className = 'agenda-group';
       const groupLabel = document.createElement('span');
       groupLabel.textContent = heading(offset);
-      // Hours per week, free information from data already on screen, and the
-      // number that matters if you are near a cap.
+      // Free information from data already on screen, and it matters near a cap.
       const groupHours = document.createElement('span');
       groupHours.className = 'group-hours';
       groupHours.textContent = `${hoursOf(shifts.filter((s) => weekOf(s.start) === offset))}h`;
@@ -374,8 +359,7 @@ function renderAgenda(shifts) {
     place.className = 'place';
     place.textContent = shift.station ?? '';
 
-    // "When is my next shift" is the question this screen gets asked most.
-    // Answer it in place rather than making someone count rows.
+    // The question this screen gets asked most, answered without counting rows.
     if (shift === shifts[0]) {
       const soon = document.createElement('span');
       soon.className = 'soon';
@@ -398,8 +382,7 @@ function renderAgenda(shifts) {
 
 /* ---------- open shifts ---------- */
 
-// A shift you could pick up that overlaps one you already hold is worth
-// flagging, unlike an availability "conflict" which is meaningless here.
+// An overlap with a shift you already hold is a real clash, unlike availability.
 function overlapsExisting(shift) {
   const start = new Date(shift.start).getTime();
   const end = new Date(shift.end).getTime();
@@ -440,9 +423,8 @@ function buildOpenRow(shift, isNew) {
   if (overlapsExisting(shift)) place.classList.add('clash');
   body.append(time, place);
 
-  // Claiming is not wired up yet: the write API has never been observed, and
-  // guessing at a request that commits you to work is not acceptable. Until a
-  // real claim is captured this hands off to TeamWork.
+  // The claim write has never been observed, and guessing at a request that
+  // commits you to a shift is not acceptable. Hands off to TeamWork until then.
   const claim = document.createElement('a');
   claim.className = 'claim';
   claim.textContent = 'Claim ↗';
@@ -491,9 +473,7 @@ function renderOpenShifts() {
   syncChecked();
 }
 
-// The pill reports the health of the link to TeamWork. How many shifts are on
-// the board is already answered by the panel right below it, and one indicator
-// trying to say two things says neither clearly.
+// Link health only. The board count is already answered by the panel below it.
 const LINK_STATES = {
   live: ['', 'TeamWork · live'],
   syncing: ['busy', 'TeamWork · syncing'],
@@ -564,10 +544,8 @@ el.refresh.addEventListener('click', () => {
   checkOpenShifts({ notify: true });
 });
 
-// Polls for as long as the page is open, including in a background tab --
-// leaving it open on a Friday is the whole point, and a hidden tab is exactly
-// when the notification matters. Backs off while hidden to stay light. Closing
-// the tab stops it completely; there is no daemon.
+// Polls while the page is open, background tab included, since that is when the
+// notification matters. Closing the tab stops it; there is no daemon.
 const POLL_VISIBLE_MS = 60000;
 const POLL_HIDDEN_MS = 150000;
 
@@ -595,9 +573,8 @@ schedulePoll();
 
 /* ---------- weekly readiness ---------- */
 
-// You need at least one shift a week to keep the job, and availability has to
-// be re-entered each week. Both are easy to forget and neither is visible
-// anywhere until it is too late.
+// One shift a week keeps the job, and availability resets weekly. Both are easy
+// to forget and neither shows anywhere until it is too late.
 
 const WEEK_MS = 604800000;
 
@@ -620,8 +597,7 @@ function shiftsInWeek(offset) {
   });
 }
 
-// The calendar month we are currently in, which is what a pay period feels
-// like even though it is not one.
+// The calendar month, which feels like a pay period even though it is not one.
 function shiftsInMonth() {
   const now = new Date();
   return shiftPool().filter((s) => {
@@ -639,20 +615,17 @@ function daysUntilNextWeek() {
 function readiness() {
   const alerts = [];
 
-  // Every day off almost certainly means TeamWork reset it and it has not been
-  // filled in yet, rather than a deliberate "I cannot work at all this week".
+  // Every day off almost always means a reset, not "I cannot work at all".
   if (live && countOn(live) === 0) {
     alerts.push({
       level: 'warn',
       text: 'Availability is empty. Set your days and save.',
-      // The most useful thing at this exact moment, and invisible the rest of
-      // the time. Fills the toggles only; saving stays a deliberate act.
+      // Useful only at this moment, so it exists only at this moment.
       action: lastSavedWeek ? { label: 'Use last saved', run: applyLastSaved } : null,
     });
   }
 
-  // myShifts is only populated once /api/shifts lands; say nothing until then
-  // rather than flash a false "no shifts" warning on load.
+  // Say nothing until shifts land, rather than flash a false warning on load.
   if (shiftsLoaded) {
     const next = shiftsInWeek(1);
     const days = daysUntilNextWeek();
@@ -670,8 +643,7 @@ function readiness() {
       alerts.push({ level: 'bad', text: 'No shifts this week.' });
     }
 
-    // Term-time hour limits on student jobs are real, and going over is the
-    // sort of thing nobody notices until payroll does.
+    // Going over a term-time cap is the sort of thing payroll notices first.
     if (weeklyHourCap) {
       for (const [offset, when] of [[0, 'this week'], [1, 'next week']]) {
         const hours = hoursOf(shiftsInWeek(offset));
@@ -722,8 +694,7 @@ function renderAlerts() {
 
 /* ---------- pay ---------- */
 
-// Rates and the tax rate live in config.json, never here. They are assumptions
-// about the real world and only Amey can confirm them.
+// Rates live in config.json. They are real-world assumptions, not code.
 let payConfig = null;
 let payVisible = false;
 
@@ -733,8 +704,7 @@ const money = (n) => new Intl.NumberFormat(undefined, {
   style: 'currency', currency: 'USD', maximumFractionDigits: 0,
 }).format(n);
 
-// Whole-shift classification by start hour. A window that does not cross
-// midnight (0 to 6) is a plain range; one that does (22 to 6) is the union.
+// Whole shift billed by its start hour. A window crossing midnight is a union.
 function isNightShift(shift) {
   const hour = new Date(shift.start).getHours();
   const { nightFrom, nightTo } = payConfig;
@@ -761,8 +731,7 @@ function payFor(shifts) {
 function payCell(className, value) {
   const span = document.createElement('span');
   span.className = className;
-  // The real figure lives in a data attribute so the visible text can be
-  // blocked out or scrambled without ever losing it.
+  // Real figure lives in the data attribute so the text can be blocked or rolled.
   span.dataset.value = value;
   return span;
 }
@@ -827,8 +796,7 @@ function paintPay(animate = false) {
   }
 }
 
-// Digits tumble briefly before settling. Borrowed from the way banking apps
-// reveal a balance: it reads as the number resolving rather than appearing.
+// Digits tumble then settle, so the number reads as resolving, not appearing.
 function rollDigits(cell, real) {
   const steps = 8;
   let step = 0;
@@ -864,8 +832,7 @@ function renderHistory(entries) {
 
     const what = document.createElement('span');
     what.className = 'what';
-    // "+Tue +Wed +Thu" rather than "Tuesday on, Wednesday on, Thursday on",
-    // which wrapped to three lines any time a whole week changed at once.
+    // Reads as a diff. The long form wrapped to three lines on a full week.
     what.textContent = entry.changes
       .map((c) => `${c.after === 'all-day' ? '+' : '−'}${label(c.name).slice(0, 3)}`)
       .join('  ');
@@ -904,8 +871,7 @@ async function load() {
     return;
   }
 
-  // Both are extras. Fetch them after the week is on screen, and never let a
-  // failure here take down the part that matters.
+  // Extras. Fetched after the week is on screen, and never fatal.
   api('/api/shifts')
     .then((data) => {
       allShifts = data.all ?? data.shifts;
@@ -922,9 +888,8 @@ async function load() {
   checkOpenShifts();
 }
 
-// The toggles are TeamWork's state, not ours. If TeamWork resets the week
-// while this page is open, the page has to follow. Skipped whenever there are
-// unsaved edits, because clobbering a draft mid-thought is worse than stale.
+// The toggles are TeamWork's state, so a reset has to reach the page. Skipped
+// while there are unsaved edits: clobbering a draft is worse than being stale.
 async function refreshWeek() {
   if (busy || !live || isDirty()) return;
   try {
@@ -1022,8 +987,7 @@ el.payToggle.addEventListener('click', () => {
 
 /* ---------- appearance ---------- */
 
-// Three states rather than a binary toggle: "auto" has to stay reachable, or
-// you can never get back to following the system once you have overridden it.
+// Three states, not two. Auto must stay reachable once you have overridden it.
 const THEMES = ['auto', 'light', 'dark'];
 
 function currentTheme() {
@@ -1070,9 +1034,8 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  // Bare keys, but never while someone is typing. A checkbox is not typing,
-  // which matters because the day toggles are checkboxes and pressing 1-7
-  // while one has focus is exactly when you want this to work.
+  // Bare keys, never while typing. A checkbox is not typing, which matters
+  // because 1-7 should still work with a day toggle focused.
   const target = event.target;
   const typing = target.isContentEditable
     || target.tagName === 'TEXTAREA'

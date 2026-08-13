@@ -17,9 +17,8 @@ const HOST = '127.0.0.1';
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const config = JSON.parse(readFileSync(new URL('./config.json', import.meta.url)));
 
-// Signing in costs a couple of seconds, so hold the session briefly rather than
-// repeating it on every click. Short enough that a server-side expiry just
-// means one slow request, not a wedged UI.
+// Sign-in costs seconds, so hold it briefly. Short enough that a server-side
+// expiry means one slow request, not a wedged UI.
 const SESSION_TTL_MS = 5 * 60 * 1000;
 let cached = null;
 
@@ -30,8 +29,7 @@ async function getSession() {
   return session;
 }
 
-// Any API failure may just be an expired session, so drop it and try once more
-// with a fresh sign-in before surfacing the error.
+// Any failure may just be an expired session, so retry once with a fresh one.
 async function withSession(fn) {
   try {
     return await fn(await getSession());
@@ -41,16 +39,14 @@ async function withSession(fn) {
   }
 }
 
-// Append-only log of what was actually saved, so "when did I change this?" has
-// an answer later. JSONL because appending a line cannot corrupt earlier ones.
+// JSONL because appending a line cannot corrupt the ones before it.
 const HISTORY = fileURLToPath(new URL('./history.jsonl', import.meta.url));
 
 async function appendHistory(entry) {
   try {
     await appendFile(HISTORY, `${JSON.stringify(entry)}\n`);
   } catch (err) {
-    // History is a nicety. Never fail a save because the log could not be
-    // written.
+    // A nicety. Never fail a save because the log could not be written.
     console.error('history: could not append,', err.message);
   }
 }
@@ -70,9 +66,8 @@ async function readHistory(limit = 20) {
   }
 }
 
-// Records the board only when it CHANGES, so the log answers "when do shifts
-// actually appear?" instead of filling up with a line a minute saying nothing
-// happened. Settles the "Friday, I think" question with evidence.
+// Logged only on change, so it answers "when do shifts appear" rather than
+// filling with a line a minute saying nothing happened.
 const BOARD_LOG = fileURLToPath(new URL('./board-log.jsonl', import.meta.url));
 let lastBoardSignature = null;
 
@@ -82,8 +77,7 @@ async function noteBoardChange(shifts) {
 
   const previous = lastBoardSignature;
   lastBoardSignature = signature;
-  // Skip the very first observation after a restart: we cannot tell a real
-  // change from simply not having looked before.
+  // First look after a restart is not a change, it is just the first look.
   if (previous === null) return;
 
   try {
@@ -120,8 +114,7 @@ async function readBody(req) {
 }
 
 async function serveStatic(req, res, pathname) {
-  // normalize() collapses any ../ before we join, so requests cannot escape
-  // the public directory.
+  // normalize() collapses ../ before the join, so requests cannot escape public/.
   const rel = normalize(pathname === '/' ? 'index.html' : pathname.slice(1));
   if (rel.startsWith('..')) return sendJson(res, 403, { error: 'forbidden' });
 
@@ -187,13 +180,12 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
-      const result = await withSession((s) => loadOpenShifts(s));
-      await noteBoardChange(result.shifts);
-      return sendJson(res, 200, { ...result, checkedAt: new Date().toISOString() });
+      const shifts = await withSession((s) => loadOpenShifts(s));
+      await noteBoardChange(shifts);
+      return sendJson(res, 200, { shifts, checkedAt: new Date().toISOString() });
     }
 
-    // Availability is wiped every week, so the most common thing to want is
-    // "whatever I had last time". The history log already knows it.
+    // Availability is wiped weekly, so "what I had last time" is the common want.
     if (pathname === '/api/last-week' && req.method === 'GET') {
       const [previous] = await readHistory(1);
       return sendJson(res, 200, { week: previous?.week ?? null, at: previous?.at ?? null });

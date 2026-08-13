@@ -189,14 +189,43 @@ const isoDate = (d) =>
 // has ~80 fields whose meaning is not documented anywhere we can see, so we
 // deliberately touch as few as possible.
 export async function loadShifts(session, { weeks = 4 } = {}) {
+  const today = new Date();
+
+  // Two things are needed and they are not the same range. The agenda wants the
+  // next few weeks; a month total wants every week the current month touches,
+  // including days already worked. Fetch the union once and slice it after.
+  const anchors = [];
+  for (let i = 0; i < weeks; i += 1) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + i * 7);
+    anchors.push(d);
+  }
+
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  for (
+    let d = new Date(today.getFullYear(), today.getMonth(), 1);
+    d <= monthEnd;
+    d.setDate(d.getDate() + 7)
+  ) {
+    anchors.push(new Date(d));
+  }
+  anchors.push(monthEnd);
+
+  // One request per calendar week, deduped, since several anchors land in the
+  // same week.
+  const fetched = new Set();
   const byId = new Map();
 
-  for (let i = 0; i < weeks; i += 1) {
-    const day = new Date();
-    day.setDate(day.getDate() + i * 7);
+  for (const anchor of anchors) {
+    const weekStart = new Date(anchor);
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    const key = isoDate(weekStart);
+    if (fetched.has(key)) continue;
+    fetched.add(key);
 
     const query = new URLSearchParams({
-      selectedDate: isoDate(day),
+      selectedDate: key,
       currentView: 'week',
       showSchedule: 'true',
       showTime: 'false',
@@ -214,24 +243,12 @@ export async function loadShifts(session, { weeks = 4 } = {}) {
     }
   }
 
+  const all = [...byId.values()].map(toShift).sort((a, b) => a.at - b.at);
   const now = Date.now();
-  return [...byId.values()]
-    .map((item) => {
-      const start = new Date(item.Start);
-      return {
-        id: item.Id,
-        start: item.Start,
-        end: item.End,
-        hours: item.Hours,
-        station: item.StnName,
-        title: item.Title,
-        // getDay() is 0=Sunday, matching DAY_ORDER.
-        day: DAY_ORDER[start.getDay()],
-        at: start.getTime(),
-      };
-    })
-    .filter((shift) => shift.at >= now)
-    .sort((a, b) => a.at - b.at);
+
+  // `shifts` drives the agenda and calendar, `all` drives pay, which has to
+  // count a shift you already worked on Monday.
+  return { shifts: all.filter((s) => s.at >= now), all };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

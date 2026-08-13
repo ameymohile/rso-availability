@@ -67,12 +67,6 @@
           </div>
         </div>
 
-        <div class="panel" id="history" hidden>
-          <div class="panel-head">
-            <h2>Recent changes</h2>
-          </div>
-          <ul class="log" id="log"></ul>
-        </div>
       </section>
 
       <!-- Right: what is happening, in priority order. -->
@@ -107,10 +101,44 @@
           </div>
         </div>
       </section>
+
+      <!-- Full width, laid out as tiles rather than a table. Take-home is the
+           number that matters, so it gets the size; hours and gross support it.
+           Hidden on every load and never remembered, because money on screen in
+           a shared space is nobody else's business. -->
+      <div class="panel" id="pay" hidden>
+        <div class="panel-head">
+          <h2>Projected pay</h2>
+          <span class="head-actions">
+            <span class="note" id="payNote"></span>
+            <button class="icon-btn eye" id="payToggle" type="button" aria-pressed="false" aria-label="Show pay">
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="eye-open">
+                <path d="M2.2 12S6 5.5 12 5.5 21.8 12 21.8 12 18 18.5 12 18.5 2.2 12 2.2 12z"/>
+                <circle cx="12" cy="12" r="3.1"/>
+              </svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="eye-shut">
+                <path d="M2.2 12S6 5.5 12 5.5c1.7 0 3.2.5 4.5 1.2M21.8 12s-1.4 2.4-3.9 4.2M9.9 9.9a3.1 3.1 0 0 0 4.3 4.3"/>
+                <path d="M4 4l16 16"/>
+              </svg>
+            </button>
+          </span>
+        </div>
+        <div class="pay-tiles" id="payRows"></div>
+      </div>
+
+      <!-- Spans both columns. Hanging it under the left column made that side
+           run far longer than the right and left a dead void at bottom right. -->
+      <div class="panel" id="history" hidden>
+        <div class="panel-head">
+          <h2>Recent changes</h2>
+        </div>
+        <ul class="log" id="log"></ul>
+      </div>
     </div>
 
     <footer class="hints">
       <span><kbd>⌘</kbd><kbd>S</kbd> save</span>
+      <span><kbd>1</kbd>–<kbd>7</kbd> toggle days</span>
       <span><kbd>R</kbd> refresh board</span>
     </footer>
   </div>

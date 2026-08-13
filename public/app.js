@@ -37,6 +37,10 @@ const el = {
   pillText: document.getElementById('pillText'),
   log: document.getElementById('log'),
   alerts: document.getElementById('alerts'),
+  pay: document.getElementById('pay'),
+  payRows: document.getElementById('payRows'),
+  payNote: document.getElementById('payNote'),
+  payToggle: document.getElementById('payToggle'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -48,6 +52,8 @@ let openShifts = [];
 let openCheckedAt = null;
 let openSeen = new Set();
 let checking = false;
+let lastSavedWeek = null;
+let weeklyHourCap = null;
 
 const label = (day) => day[0].toUpperCase() + day.slice(1);
 const isDirty = () => DAYS.some((d) => live[d] !== draft[d]);
@@ -70,6 +76,18 @@ const fmtTime = (iso) =>
   new Date(iso)
     .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
     .replace(':00', '');
+
+// Calendar-day difference, not elapsed hours. A shift at 8pm tomorrow reads as
+// "tomorrow" even though it is 26 hours out.
+function relativeDay(iso) {
+  const midnight = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
+  const days = Math.round((midnight(iso) - midnight(new Date())) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  if (days < 7) return `in ${days} days`;
+  const weeks = Math.round(days / 7);
+  return `in ${weeks} week${weeks === 1 ? '' : 's'}`;
+}
 
 function relativeTime(iso) {
   const seconds = Math.round((Date.now() - new Date(iso)) / 1000);
@@ -166,14 +184,23 @@ function buildRow(day) {
 
 function syncFooter() {
   const dirty = isDirty();
+  const pending = DAYS.filter((d) => live[d] !== draft[d]).length;
   el.save.className = 'save';
   el.save.disabled = !dirty;
-  el.save.textContent = dirty ? 'Save changes' : 'Saved';
+  // Naming the count turns the button into a confirmation of what you just did,
+  // which matters when the thing being written is your real work schedule.
+  el.save.textContent = dirty
+    ? `Save ${pending} change${pending === 1 ? '' : 's'}`
+    : 'Saved';
 
   const n = countOn(draft);
   el.subtitle.textContent = n === 0
     ? 'Not available any day this week.'
     : `Available ${n} ${n === 1 ? 'day' : 'days'} a week, all day.`;
+
+  // Toggling a day does not rebuild the calendar, so the headers are synced
+  // here instead, where every change already lands.
+  syncCalendarHeads();
 
   if (dirty) {
     const changed = DAYS.filter((d) => live[d] !== draft[d]);
@@ -186,6 +213,9 @@ function syncFooter() {
 /* ---------- upcoming shifts ---------- */
 
 let myShifts = [];
+// Upcoming only drives the agenda. Pay needs the wider set, because a shift you
+// worked on Monday still counts towards this week's money.
+let allShifts = [];
 let shiftsLoaded = false;
 
 function renderShifts(shifts) {
@@ -198,6 +228,8 @@ function renderShifts(shifts) {
     el.agenda.replaceChildren();
     el.shiftsSummary.textContent = 'Nothing scheduled in the next four weeks.';
     renderAlerts();
+    // Still worth showing: zeros are the answer to "what am I earning".
+    renderPay();
     return;
   }
 
@@ -210,6 +242,7 @@ function renderShifts(shifts) {
   renderCalendar(shifts);
   renderAgenda(shifts);
   renderAlerts();
+  renderPay();
 }
 
 function renderCalendar(shifts) {
@@ -237,6 +270,7 @@ function renderCalendar(shifts) {
     // Two columns share the letter S and two share T, so give assistive tech
     // the real name instead of a bare initial.
     head.title = DAYS[i];
+    head.dataset.day = DAYS[i];
     return head;
   });
 
@@ -273,6 +307,17 @@ function renderCalendar(shifts) {
   }
 
   el.cal.replaceChildren(...cells);
+  syncCalendarHeads();
+}
+
+// The calendar columns and the day toggles are the same seven weekdays. Marking
+// the ones you are available for lets you read "I offered Tue/Wed/Thu and the
+// work landed on Sat/Mon" without cross-referencing two panels.
+function syncCalendarHeads() {
+  if (!draft) return;
+  for (const head of el.cal.querySelectorAll('.cal-head')) {
+    head.classList.toggle('avail', draft[head.dataset.day] === 'all-day');
+  }
 }
 
 function renderAgenda(shifts) {
@@ -293,14 +338,22 @@ function renderAgenda(shifts) {
       lastOffset = offset;
       const li = document.createElement('li');
       li.className = 'agenda-group';
-      li.textContent = heading(offset);
+      const groupLabel = document.createElement('span');
+      groupLabel.textContent = heading(offset);
+      // Hours per week, free information from data already on screen, and the
+      // number that matters if you are near a cap.
+      const groupHours = document.createElement('span');
+      groupHours.className = 'group-hours';
+      groupHours.textContent = `${hoursOf(shifts.filter((s) => weekOf(s.start) === offset))}h`;
+      li.append(groupLabel, groupHours);
       items.push(li);
     }
 
     const start = new Date(shift.start);
 
     const li = document.createElement('li');
-    li.className = 'agenda-item';
+    // shifts is sorted soonest-first, so the first entry is the next one up.
+    li.className = `agenda-item${shift === shifts[0] ? ' next' : ''}`;
 
     const when = document.createElement('span');
     when.className = 'when';
@@ -320,6 +373,16 @@ function renderAgenda(shifts) {
     const place = document.createElement('span');
     place.className = 'place';
     place.textContent = shift.station ?? '';
+
+    // "When is my next shift" is the question this screen gets asked most.
+    // Answer it in place rather than making someone count rows.
+    if (shift === shifts[0]) {
+      const soon = document.createElement('span');
+      soon.className = 'soon';
+      soon.textContent = relativeDay(shift.start);
+      place.append(document.createTextNode(' · '), soon);
+    }
+
     body.append(time, place);
 
     const dur = document.createElement('span');
@@ -545,11 +608,25 @@ function weekStartOf(date) {
   return d;
 }
 
+const hoursOf = (list) => list.reduce((sum, s) => sum + (s.hours ?? 0), 0);
+
+const shiftPool = () => (allShifts.length ? allShifts : myShifts);
+
 function shiftsInWeek(offset) {
   const start = weekStartOf(new Date()).getTime() + offset * WEEK_MS;
-  return myShifts.filter((s) => {
+  return shiftPool().filter((s) => {
     const w = weekStartOf(new Date(s.start)).getTime();
     return w === start;
+  });
+}
+
+// The calendar month we are currently in, which is what a pay period feels
+// like even though it is not one.
+function shiftsInMonth() {
+  const now = new Date();
+  return shiftPool().filter((s) => {
+    const d = new Date(s.start);
+    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
   });
 }
 
@@ -568,6 +645,9 @@ function readiness() {
     alerts.push({
       level: 'warn',
       text: 'Availability is empty. Set your days and save.',
+      // The most useful thing at this exact moment, and invisible the rest of
+      // the time. Fills the toggles only; saving stays a deliberate act.
+      action: lastSavedWeek ? { label: 'Use last saved', run: applyLastSaved } : null,
     });
   }
 
@@ -589,9 +669,32 @@ function readiness() {
     if (!thisWeek.length) {
       alerts.push({ level: 'bad', text: 'No shifts this week.' });
     }
+
+    // Term-time hour limits on student jobs are real, and going over is the
+    // sort of thing nobody notices until payroll does.
+    if (weeklyHourCap) {
+      for (const [offset, when] of [[0, 'this week'], [1, 'next week']]) {
+        const hours = hoursOf(shiftsInWeek(offset));
+        if (hours > weeklyHourCap) {
+          alerts.push({
+            level: 'bad',
+            text: `${hours} hours ${when}, over your ${weeklyHourCap} hour cap.`,
+          });
+        }
+      }
+    }
   }
 
   return alerts;
+}
+
+// Load the last saved week into the toggles without submitting it. The user
+// still reviews and presses Save, so a stale preset can never save itself.
+function applyLastSaved() {
+  if (!lastSavedWeek) return;
+  draft = { ...lastSavedWeek };
+  render();
+  el.save.focus();
 }
 
 function renderAlerts() {
@@ -601,9 +704,144 @@ function renderAlerts() {
     const div = document.createElement('div');
     div.className = `alert ${a.level}`;
     const dot = document.createElement('i');
-    div.append(dot, document.createTextNode(a.text));
+    const text = document.createElement('span');
+    text.textContent = a.text;
+    div.append(dot, text);
+
+    if (a.action) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'alert-action';
+      button.textContent = a.action.label;
+      button.addEventListener('click', a.action.run);
+      div.append(button);
+    }
     return div;
   }));
+}
+
+/* ---------- pay ---------- */
+
+// Rates and the tax rate live in config.json, never here. They are assumptions
+// about the real world and only Amey can confirm them.
+let payConfig = null;
+let payVisible = false;
+
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const money = (n) => new Intl.NumberFormat(undefined, {
+  style: 'currency', currency: 'USD', maximumFractionDigits: 0,
+}).format(n);
+
+// Whole-shift classification by start hour. A window that does not cross
+// midnight (0 to 6) is a plain range; one that does (22 to 6) is the union.
+function isNightShift(shift) {
+  const hour = new Date(shift.start).getHours();
+  const { nightFrom, nightTo } = payConfig;
+  return nightFrom < nightTo
+    ? hour >= nightFrom && hour < nightTo
+    : hour >= nightFrom || hour < nightTo;
+}
+
+function payFor(shifts) {
+  let baseHours = 0;
+  let nightHours = 0;
+  for (const shift of shifts) {
+    if (isNightShift(shift)) nightHours += shift.hours ?? 0;
+    else baseHours += shift.hours ?? 0;
+  }
+  const gross = baseHours * payConfig.base + nightHours * payConfig.night;
+  return {
+    hours: baseHours + nightHours,
+    gross,
+    net: gross * (1 - (payConfig.taxRate ?? 0)),
+  };
+}
+
+function payCell(className, value) {
+  const span = document.createElement('span');
+  span.className = className;
+  // The real figure lives in a data attribute so the visible text can be
+  // blocked out or scrambled without ever losing it.
+  span.dataset.value = value;
+  return span;
+}
+
+function payTile(name, list) {
+  const p = payFor(list);
+
+  const tile = document.createElement('div');
+  tile.className = 'pay-tile';
+
+  const when = document.createElement('span');
+  when.className = 'pay-when';
+  when.textContent = name;
+
+  // Take-home is the figure you actually receive, so it is the one set large.
+  const take = payCell('pay-take mono', money(p.net));
+
+  const detail = document.createElement('span');
+  detail.className = 'pay-detail';
+  const hours = document.createElement('span');
+  hours.className = 'mono';
+  hours.textContent = p.hours ? `${p.hours}h` : '0h';
+  detail.append(hours, document.createTextNode(' · '));
+  detail.append(payCell('pay-gross mono', money(p.gross)));
+  detail.append(document.createTextNode(' gross'));
+
+  tile.append(when, take, detail);
+  return tile;
+}
+
+function renderPay() {
+  if (!payConfig || !shiftsLoaded) return;
+  el.pay.hidden = false;
+
+  el.payRows.replaceChildren(
+    payTile('This week', shiftsInWeek(0)),
+    payTile('Next week', shiftsInWeek(1)),
+    payTile(new Date().toLocaleDateString(undefined, { month: 'long' }), shiftsInMonth()),
+  );
+
+  const rate = Math.round((payConfig.taxRate ?? 0) * 100);
+  el.payNote.textContent =
+    `$${payConfig.base}/h · $${payConfig.night}/h nights · take-home est. after ${rate}%`;
+
+  paintPay();
+}
+
+// Digits become blocks of the same width, so revealing never shifts the layout.
+const blocked = (text) => text.replace(/[0-9]/g, '▒');
+
+function paintPay(animate = false) {
+  for (const cell of el.payRows.querySelectorAll('[data-value]')) {
+    const real = cell.dataset.value;
+    if (!payVisible) {
+      clearInterval(cell.rollTimer);
+      cell.textContent = blocked(real);
+    } else if (animate && !reduceMotion) {
+      rollDigits(cell, real);
+    } else {
+      cell.textContent = real;
+    }
+  }
+}
+
+// Digits tumble briefly before settling. Borrowed from the way banking apps
+// reveal a balance: it reads as the number resolving rather than appearing.
+function rollDigits(cell, real) {
+  const steps = 8;
+  let step = 0;
+  clearInterval(cell.rollTimer);
+  cell.rollTimer = setInterval(() => {
+    step += 1;
+    if (step >= steps) {
+      clearInterval(cell.rollTimer);
+      cell.textContent = real;
+      return;
+    }
+    cell.textContent = real.replace(/[0-9]/g, () => String(Math.floor(Math.random() * 10)));
+  }, 45);
 }
 
 /* ---------- history ---------- */
@@ -626,9 +864,11 @@ function renderHistory(entries) {
 
     const what = document.createElement('span');
     what.className = 'what';
+    // "+Tue +Wed +Thu" rather than "Tuesday on, Wednesday on, Thursday on",
+    // which wrapped to three lines any time a whole week changed at once.
     what.textContent = entry.changes
-      .map((c) => `${label(c.name)} ${c.after === 'all-day' ? 'on' : 'off'}`)
-      .join(', ');
+      .map((c) => `${c.after === 'all-day' ? '+' : '−'}${label(c.name).slice(0, 3)}`)
+      .join('  ');
 
     li.append(when, what);
     if (!entry.verified) li.classList.add('unverified');
@@ -652,6 +892,8 @@ async function load() {
     live = data.week;
     draft = { ...data.week };
     verifiedAt = data.at;
+    weeklyHourCap = data.weeklyHourCap ?? null;
+    payConfig = data.pay ?? null;
     render();
   } catch (err) {
     el.days.setAttribute('aria-busy', 'false');
@@ -665,8 +907,16 @@ async function load() {
   // Both are extras. Fetch them after the week is on screen, and never let a
   // failure here take down the part that matters.
   api('/api/shifts')
-    .then((data) => renderShifts(data.shifts))
+    .then((data) => {
+      allShifts = data.all ?? data.shifts;
+      renderShifts(data.shifts);
+    })
     .catch((err) => console.warn('shifts unavailable:', err.message));
+
+  // Powers the "Use last saved" shortcut on an empty week.
+  api('/api/last-week')
+    .then((data) => { lastSavedWeek = data.week; renderAlerts(); })
+    .catch((err) => console.warn('last week unavailable:', err.message));
 
   refreshHistory();
   checkOpenShifts();
@@ -762,6 +1012,14 @@ setInterval(() => {
 
 load();
 
+el.payToggle.addEventListener('click', () => {
+  payVisible = !payVisible;
+  el.payToggle.setAttribute('aria-pressed', String(payVisible));
+  el.payToggle.setAttribute('aria-label', payVisible ? 'Hide pay' : 'Show pay');
+  el.pay.classList.toggle('revealed', payVisible);
+  paintPay(payVisible);
+});
+
 /* ---------- appearance ---------- */
 
 // Three states rather than a binary toggle: "auto" has to stay reachable, or
@@ -812,11 +1070,27 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  // Bare letters only when not typing into something.
-  if (meta || event.altKey || /input|textarea/i.test(event.target.tagName)) return;
+  // Bare keys, but never while someone is typing. A checkbox is not typing,
+  // which matters because the day toggles are checkboxes and pressing 1-7
+  // while one has focus is exactly when you want this to work.
+  const target = event.target;
+  const typing = target.isContentEditable
+    || target.tagName === 'TEXTAREA'
+    || (target.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(target.type));
+  if (meta || event.altKey || typing) return;
+
   if (event.key.toLowerCase() === 'r') {
     event.preventDefault();
     el.refresh.click();
+    return;
+  }
+
+  // 1-7 toggle Sunday through Saturday, matching the on-screen order.
+  const digit = Number(event.key);
+  if (Number.isInteger(digit) && digit >= 1 && digit <= 7) {
+    event.preventDefault();
+    const name = DAYS[digit - 1];
+    el.days.querySelector(`input[aria-label="${label(name)} availability"]`)?.click();
   }
 });
 

@@ -22,6 +22,9 @@
   --btn-fg: #ffffff;
   --danger: #d70015;
   --focus: #0071e3;
+  /* Catches light along a panel's top edge. Pointless on white-on-white, so
+     it is off in light mode and only earns its keep in the dark theme. */
+  --edge: transparent;
   --warn: #9a5b00;
   --warn-bg: rgba(180, 105, 0, 0.09);
 }
@@ -40,6 +43,7 @@
   --btn-fg: #141417;
   --danger: #ff453a;
   --focus: #0a84ff;
+  --edge: rgba(255, 255, 255, 0.045);
   --warn: #ffb340;
   --warn-bg: rgba(255, 159, 10, 0.11);
 }
@@ -60,6 +64,7 @@
     --btn-fg: #141417;
     --danger: #ff453a;
     --focus: #0a84ff;
+    --edge: rgba(255, 255, 255, 0.045);
     --warn: #ffb340;
     --warn-bg: rgba(255, 159, 10, 0.11);
   }
@@ -223,10 +228,19 @@ body {
   min-width: 0;
 }
 
+/* Full width under both columns, so neither side runs long on its own. */
+#history { grid-column: 1 / -1; }
+#history[hidden] { display: none; }
+
+/* The log is a wide, shallow table now, so let the rows breathe sideways
+   instead of stacking date above change. */
+#history .log li { padding: 10px 18px; }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
+  box-shadow: inset 0 1px 0 var(--edge);
   overflow: hidden;
 }
 
@@ -445,9 +459,11 @@ body {
 
 /* ---------- open shifts ---------- */
 
+/* This panel is empty most of the time, so it should not claim space it is not
+   using. */
 .empty {
   margin: 0;
-  padding: 26px 18px;
+  padding: 20px 18px;
   text-align: center;
   font-size: 13px;
   color: var(--faint);
@@ -519,7 +535,12 @@ body {
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--faint);
+  transition: color 0.2s ease;
 }
+
+/* A weekday you have offered. Same green as the toggle that set it, so the
+   link between the two panels reads without a legend. */
+.cal-head.avail { color: var(--accent); }
 
 .cal-day {
   display: flex;
@@ -545,17 +566,32 @@ body {
 .cal-day.today .num { background: var(--text); color: var(--bg); font-weight: 640; }
 
 .cal-day .dots { display: flex; gap: 3px; height: 4px; }
+
+/* Green reads as "you are on" throughout: available days, booked days, and the
+   next-shift countdown. Against a monochrome grid, 4px of accent is what makes
+   a working day findable at a glance. */
 .cal-day .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
 
 .agenda { margin: 0; padding: 6px 18px 10px; list-style: none; }
 
 .agenda-group {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   margin: 12px 0 1px;
   font-size: 10px;
   font-weight: 640;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--faint);
+}
+
+/* The group header is uppercased, which was turning "4h" into "4H". Hours are
+   a unit, not a label. */
+.group-hours {
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
 }
 
 .agenda-group:first-child { margin-top: 4px; }
@@ -684,6 +720,9 @@ kbd {
   .grid { grid-template-columns: minmax(0, 1fr); }
   .split { grid-template-columns: minmax(0, 1fr); }
   .cal-wrap { border-right: none; border-bottom: 1px solid var(--line); }
+  .pay-tiles { grid-template-columns: 1fr; }
+  .pay-tile { border-right: none; border-bottom: 1px solid var(--line); }
+  .pay-tile:last-child { border-bottom: none; }
   .hints { display: none; }
 }
 
@@ -700,6 +739,56 @@ kbd {
   color: var(--faint);
   opacity: 0.75;
 }
+
+/* ---------- pay ---------- */
+
+#pay { grid-column: 1 / -1; }
+#pay[hidden] { display: none; }
+
+/* Three equal readouts rather than a table. A table makes you read across to
+   find the number you want; a tile puts it where your eye already is. */
+.pay-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.pay-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 15px 20px 17px;
+  border-right: 1px solid var(--line);
+}
+
+.pay-tile:last-child { border-right: none; }
+
+.pay-when {
+  font-size: 9.5px;
+  font-weight: 640;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* The money you actually receive. Big, tight, tabular so the three tiles line
+   up digit for digit. */
+.pay-take {
+  font-size: 28px;
+  font-weight: 640;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.pay-detail { font-size: 12px; color: var(--faint); }
+
+/* Blocked digits sit dimmer, so hidden reads as deliberate rather than broken. */
+#pay:not(.revealed) .pay-take { color: var(--muted); letter-spacing: 0.02em; }
+#pay:not(.revealed) .pay-gross { opacity: 0.8; }
+
+.eye .eye-shut { display: none; }
+#pay.revealed .eye .eye-open { display: none; }
+#pay.revealed .eye .eye-shut { display: block; }
+#pay.revealed .eye { color: var(--text); }
 
 /* ---------- readiness alerts ---------- */
 
@@ -741,3 +830,28 @@ kbd {
 /* Reserved for the one that costs the job: a week with no shift at all. */
 .alert.bad { background: var(--warn-bg); border-color: transparent; color: var(--danger); }
 .alert.bad i { background: var(--danger); }
+
+/* An alert that offers the fix is worth more than one that only complains. */
+.alert-action {
+  margin-left: auto;
+  flex: none;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 7px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.18s ease, transform 0.1s ease;
+}
+
+.alert-action:hover { opacity: 0.86; }
+.alert-action:active { transform: scale(0.97); }
+
+/* The next shift up. Its weekday brightens, and the countdown keeps the accent:
+   "how soon" is the one scheduling fact worth colouring, and there is exactly
+   one of these on screen at a time so it cannot compete with anything. */
+.agenda-item.next .dow { color: var(--text); }
+.soon { color: var(--accent); font-weight: 500; }

@@ -2,9 +2,7 @@
   "template": "RSO Boston",
   "employeeCode": "Resident",
   "employeeUser": "YOUR_EMPLOYEE_NUMBER",
-
   "_comment": "Your standing weekly availability. 'all-day' or 'off'. The web UI does not read this file, only the CLI does.",
-
   "week": {
     "sunday": "off",
     "monday": "off",
@@ -13,5 +11,7 @@
     "thursday": "all-day",
     "friday": "off",
     "saturday": "off"
-  }
+  },
+  "weeklyHourCap": null,
+  "_weeklyHourCap": "Warn when a week goes over this many hours. null disables it. On-campus student jobs are often capped at 20 during term."
 }

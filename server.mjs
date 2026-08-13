@@ -147,6 +147,8 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, {
         template: meta.Title,
         week: readWeek(template),
+        weeklyHourCap: config.weeklyHourCap ?? null,
+        pay: config.pay ?? null,
         at: new Date().toISOString(),
       });
     }
@@ -180,14 +182,21 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/shifts' && req.method === 'GET') {
-      const shifts = await withSession((s) => loadShifts(s));
-      return sendJson(res, 200, { shifts });
+      const { shifts, all } = await withSession((s) => loadShifts(s));
+      return sendJson(res, 200, { shifts, all });
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
       const result = await withSession((s) => loadOpenShifts(s));
       await noteBoardChange(result.shifts);
       return sendJson(res, 200, { ...result, checkedAt: new Date().toISOString() });
+    }
+
+    // Availability is wiped every week, so the most common thing to want is
+    // "whatever I had last time". The history log already knows it.
+    if (pathname === '/api/last-week' && req.method === 'GET') {
+      const [previous] = await readHistory(1);
+      return sendJson(res, 200, { week: previous?.week ?? null, at: previous?.at ?? null });
     }
 
     if (pathname === '/api/history' && req.method === 'GET') {

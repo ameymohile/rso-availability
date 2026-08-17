@@ -272,6 +272,7 @@ function renderCalendar(shifts) {
 
     const cell = document.createElement('span');
     cell.className = 'cal-day';
+    cell.dataset.date = key;
     if (key === todayKey) cell.classList.add('today');
     if (key < todayKey) cell.classList.add('past');
     if (count) cell.classList.add('has-shift');
@@ -340,6 +341,7 @@ function renderAgenda(shifts) {
     const li = document.createElement('li');
     // shifts is sorted soonest-first, so the first entry is the next one up.
     li.className = `agenda-item${shift === shifts[0] ? ' next' : ''}`;
+    li.dataset.date = dateKey(start);
 
     const when = document.createElement('span');
     when.className = 'when';
@@ -383,7 +385,11 @@ function renderAgenda(shifts) {
 
 /* ---------- open shifts ---------- */
 
-// The station name doubles as directions, so there is no second control to add.
+const PIN = `<svg class="pin" viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M12 21.2s6.6-6.1 6.6-10.6a6.6 6.6 0 1 0-13.2 0C5.4 15.1 12 21.2 12 21.2z"/>
+  <circle cx="12" cy="10.4" r="2.4"/></svg>`;
+
+// A bare underline was invisible, so the pin says "this goes somewhere".
 function stationEl(shift) {
   if (!shift.station) return document.createTextNode('');
   if (!shift.mapUrl) return document.createTextNode(shift.station);
@@ -393,8 +399,9 @@ function stationEl(shift) {
   link.href = shift.mapUrl;
   link.target = '_blank';
   link.rel = 'noopener';
-  link.textContent = shift.station;
   link.title = `Directions to ${shift.station}`;
+  link.append(shift.station);
+  link.insertAdjacentHTML('beforeend', PIN);
   return link;
 }
 
@@ -798,20 +805,14 @@ function renderPay() {
   paintPay();
 }
 
-// Digits become blocks of the same width, so revealing never shifts the layout.
-const blocked = (text) => text.replace(/[0-9]/g, '▒');
-
+// Hiding is a CSS blur rather than substituted characters, so the layout never
+// shifts and the number reads as private rather than missing.
 function paintPay(animate = false) {
   for (const cell of el.payRows.querySelectorAll('[data-value]')) {
     const real = cell.dataset.value;
-    if (!payVisible) {
-      clearInterval(cell.rollTimer);
-      cell.textContent = blocked(real);
-    } else if (animate && !reduceMotion) {
-      rollDigits(cell, real);
-    } else {
-      cell.textContent = real;
-    }
+    clearInterval(cell.rollTimer);
+    if (payVisible && animate && !reduceMotion) rollDigits(cell, real);
+    else cell.textContent = real;
   }
 }
 
@@ -995,6 +996,21 @@ setInterval(() => {
 }, 30000);
 
 load();
+
+// A dot on the calendar and its row in the agenda are the same shift, so make
+// the grid a way to find it rather than a picture of it.
+el.cal.addEventListener('click', (event) => {
+  const cell = event.target.closest('.cal-day.has-shift');
+  if (!cell) return;
+
+  const row = el.agenda.querySelector(`.agenda-item[data-date="${cell.dataset.date}"]`);
+  if (!row) return;
+
+  row.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
+  row.classList.remove('flash');
+  void row.offsetWidth; // restart the animation if the same day is clicked twice
+  row.classList.add('flash');
+});
 
 // Manual trigger. The server also syncs on every shift refresh, so this is for
 // when you want it now rather than within the minute.

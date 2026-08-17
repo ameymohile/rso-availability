@@ -308,19 +308,28 @@ a.icon-btn { text-decoration: none; }
 /* A spinning calendar icon reads as broken, so working state pulses instead. */
 .icon-btn.working { animation: pulse 1s ease-in-out infinite; }
 
-/* The station name is the directions link. Underlined only on hover, so a row
-   of shifts does not turn into a row of links. */
+/* The station name is the directions link. The pin carries the affordance so
+   the text can stay unadorned until you reach for it. */
 .station {
   color: inherit;
   text-decoration: none;
-  border-bottom: 1px solid transparent;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  transition: color 0.15s ease;
 }
 
-.station:hover {
-  color: var(--text);
-  border-bottom-color: currentColor;
+.pin {
+  width: 10px;
+  height: 10px;
+  margin-left: 4px;
+  vertical-align: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  opacity: 0.45;
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
+
+.station:hover { color: var(--text); }
+.station:hover .pin { opacity: 1; transform: translateY(-1px); }
 
 /* ---------- availability rows ---------- */
 
@@ -584,6 +593,10 @@ a.icon-btn { text-decoration: none; }
 .cal-day.past .dots i { opacity: 0.4; }
 .cal-day.today .num { background: var(--text); color: var(--bg); font-weight: 640; }
 
+/* Days with work are the only clickable ones, and they say so on hover. */
+.cal-day.has-shift { cursor: pointer; }
+.cal-day.has-shift:hover .num { background: var(--panel-2); }
+
 .cal-day .dots { display: flex; gap: 3px; height: 4px; }
 
 /* Green reads as "you are on" throughout: available days, booked days, and the
@@ -727,6 +740,17 @@ kbd {
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 @keyframes settle { 0% { transform: scale(0.98); } 60% { transform: scale(1.012); } 100% { transform: scale(1); } }
 @keyframes arrive { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+@keyframes flash { from { background: var(--panel-2); } to { background: transparent; } }
+@keyframes rise { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+
+.agenda-item.flash { animation: flash 1.2s ease-out; }
+
+/* Panels settle in on load, staggered top-left to bottom-right so the eye is
+   led through the page in reading order rather than everything landing at once. */
+.grid > * { animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.grid > *:nth-child(2) { animation-delay: 0.07s; }
+.grid > *:nth-child(3) { animation-delay: 0.14s; }
+.grid > *:nth-child(4) { animation-delay: 0.21s; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::after { transition: none !important; animation: none !important; }
@@ -800,9 +824,18 @@ kbd {
 
 .pay-detail { font-size: 12px; color: var(--faint); }
 
-/* Blocked digits sit dimmer, so hidden reads as deliberate rather than broken. */
-#pay:not(.revealed) .pay-take { color: var(--muted); letter-spacing: 0.02em; }
-#pay:not(.revealed) .pay-gross { opacity: 0.8; }
+/* Blurred, not substituted. The figure keeps its shape, so revealing it feels
+   like focus pulling rather than content appearing. */
+.pay-take, .pay-gross { transition: filter 0.4s cubic-bezier(0.22, 1, 0.36, 1); }
+
+#pay:not(.revealed) .pay-take { filter: blur(9px); }
+#pay:not(.revealed) .pay-gross { filter: blur(4.5px); }
+
+#pay:not(.revealed) .pay-take,
+#pay:not(.revealed) .pay-gross {
+  user-select: none;
+  pointer-events: none;
+}
 
 .eye .eye-shut { display: none; }
 #pay.revealed .eye .eye-open { display: none; }

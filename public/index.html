@@ -89,7 +89,18 @@
         <div class="panel" id="shifts" hidden>
           <div class="panel-head">
             <h2>Upcoming shifts</h2>
-            <span class="note mono" id="shiftsSummary"></span>
+            <span class="head-actions">
+              <span class="note mono" id="shiftsSummary"></span>
+              <!-- Pushes into Calendar.app directly. Subscribing to a loopback
+                   HTTP feed is refused by Calendar, so this writes the events. -->
+              <button class="icon-btn" id="syncCal" type="button"
+                      title="Sync to Calendar" aria-label="Sync these shifts to Calendar">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3.2" y="4.8" width="17.6" height="16" rx="2.6"/>
+                  <path d="M3.2 9.8h17.6M8 3.2v3.2M16 3.2v3.2"/>
+                </svg>
+              </button>
+            </span>
           </div>
 
           <div class="split">

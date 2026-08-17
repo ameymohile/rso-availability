@@ -10,7 +10,9 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation } from './tmwork.mjs';
+import { buildCalendar } from './calendar.mjs';
+import { syncCalendar } from './calendar-sync.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -37,6 +39,43 @@ async function withSession(fn) {
     cached = null;
     return fn(await getSession());
   }
+}
+
+// A subscribed calendar polls this, and every rebuild costs several TeamWork
+// calls, so the result is held briefly and shared with the UI.
+const SHIFTS_TTL_MS = 5 * 60 * 1000;
+let shiftCache = null;
+
+const withPlace = (shift) => ({ ...shift, ...locateStation(shift.station, config.maps) });
+
+async function refreshShifts() {
+  const { shifts, all } = await withSession((s) => loadShifts(s));
+  const data = { shifts: shifts.map(withPlace), all: all.map(withPlace) };
+  shiftCache = { data, at: Date.now() };
+
+  // Push into Calendar whenever the schedule is re-read, which is what makes
+  // this automatic. Never let a Calendar failure break serving shifts.
+  if (config.calendar?.autoSync) {
+    syncCalendar(data.all, config.calendar)
+      .then(({ synced }) => console.log(`calendar: synced ${synced} shifts`))
+      .catch((err) => console.error('calendar sync failed,', err.message));
+  }
+
+  return data;
+}
+
+// Cold, this costs a sign-in plus a request per week, which is far longer than
+// a calendar client will wait. `allowStale` hands back the last copy and
+// refreshes behind the scenes so the feed always answers immediately.
+async function getShifts({ allowStale = false } = {}) {
+  if (shiftCache && Date.now() - shiftCache.at < SHIFTS_TTL_MS) return shiftCache.data;
+
+  if (allowStale && shiftCache) {
+    refreshShifts().catch((err) => console.error('shift refresh failed,', err.message));
+    return shiftCache.data;
+  }
+
+  return refreshShifts();
 }
 
 // JSONL because appending a line cannot corrupt the ones before it.
@@ -175,14 +214,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/shifts' && req.method === 'GET') {
-      const { shifts, all } = await withSession((s) => loadShifts(s));
-      return sendJson(res, 200, { shifts, all });
+      return sendJson(res, 200, await getShifts());
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
-      const shifts = await withSession((s) => loadOpenShifts(s));
-      await noteBoardChange(shifts);
-      return sendJson(res, 200, { shifts, checkedAt: new Date().toISOString() });
+      const open = await withSession((s) => loadOpenShifts(s));
+      await noteBoardChange(open);
+      return sendJson(res, 200, {
+        shifts: open.map(withPlace),
+        checkedAt: new Date().toISOString(),
+      });
     }
 
     // Availability is wiped weekly, so "what I had last time" is the common want.
@@ -195,6 +236,23 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { history: await readHistory() });
     }
 
+    if (pathname === '/api/calendar/sync' && req.method === 'POST') {
+      const { all } = await getShifts();
+      const result = await syncCalendar(all, config.calendar);
+      return sendJson(res, 200, { ...result, calendar: config.calendar?.name });
+    }
+
+    // Kept as a manual fallback and for any client that can read a file.
+    if (pathname === '/calendar.ics') {
+      const { all } = await getShifts({ allowStale: true });
+      res.writeHead(200, {
+        'content-type': 'text/calendar; charset=utf-8',
+        'content-disposition': 'attachment; filename="rso-shifts.ics"',
+        'cache-control': 'no-cache',
+      });
+      return res.end(buildCalendar(all, { name: `${config.template} shifts` }));
+    }
+
     if (pathname.startsWith('/api/')) return sendJson(res, 404, { error: 'no such endpoint' });
 
     return serveStatic(req, res, pathname);
@@ -205,4 +263,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`RSO availability UI  ->  http://${HOST}:${PORT}`);
+  // Warm the cache so the first calendar poll never waits on a cold sign-in.
+  refreshShifts().catch((err) => console.error('warm-up failed,', err.message));
 });

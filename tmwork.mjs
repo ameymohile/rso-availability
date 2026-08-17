@@ -214,6 +214,22 @@ export async function saveAndVerify(session, config, week) {
 
 /* ---------- shifts ---------- */
 
+// A search URL beats coordinates: it needs no data entry and survives a station
+// being renamed. `stations` overrides the ones Google resolves badly.
+export function locateStation(station, { campus = '', stations = {}, aliases = {} } = {}) {
+  if (!station) return {};
+
+  // Expanded for the map query only. The UI keeps showing the real name.
+  const expanded = station.split(' ').map((word) => aliases[word] ?? word).join(' ');
+  const override = stations[station];
+  const query = override ?? [expanded, campus].filter(Boolean).join(', ');
+
+  return {
+    location: override ? station : query,
+    mapUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`,
+  };
+}
+
 // Only Start/End/Hours/StnName are relied on. The payload carries ~80 fields.
 const toShift = (item) => ({
   id: item.Id,

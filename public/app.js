@@ -36,6 +36,7 @@ const el = {
   payRows: document.getElementById('payRows'),
   payNote: document.getElementById('payNote'),
   payToggle: document.getElementById('payToggle'),
+  syncCal: document.getElementById('syncCal'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -357,7 +358,7 @@ function renderAgenda(shifts) {
     time.textContent = `${fmtTime(shift.start)} – ${fmtTime(shift.end)}`;
     const place = document.createElement('span');
     place.className = 'place';
-    place.textContent = shift.station ?? '';
+    place.append(stationEl(shift));
 
     // The question this screen gets asked most, answered without counting rows.
     if (shift === shifts[0]) {
@@ -381,6 +382,21 @@ function renderAgenda(shifts) {
 }
 
 /* ---------- open shifts ---------- */
+
+// The station name doubles as directions, so there is no second control to add.
+function stationEl(shift) {
+  if (!shift.station) return document.createTextNode('');
+  if (!shift.mapUrl) return document.createTextNode(shift.station);
+
+  const link = document.createElement('a');
+  link.className = 'station';
+  link.href = shift.mapUrl;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = shift.station;
+  link.title = `Directions to ${shift.station}`;
+  return link;
+}
 
 // An overlap with a shift you already hold is a real clash, unlike availability.
 function overlapsExisting(shift) {
@@ -416,11 +432,14 @@ function buildOpenRow(shift, isNew) {
   time.textContent = `${fmtTime(shift.start)} – ${fmtTime(shift.end)}`;
   const place = document.createElement('span');
   place.className = 'place';
-  const bits = [shift.station, `${shift.hours}h`].filter(Boolean);
-  if (shift.offeredTo) bits.push('offered to you');
-  if (overlapsExisting(shift)) bits.push('clashes with a shift you have');
-  place.textContent = bits.join(' · ');
-  if (overlapsExisting(shift)) place.classList.add('clash');
+  const clash = overlapsExisting(shift);
+  const extras = [`${shift.hours}h`];
+  if (shift.offeredTo) extras.push('offered to you');
+  if (clash) extras.push('clashes with a shift you have');
+
+  if (shift.station) place.append(stationEl(shift), document.createTextNode(' · '));
+  place.append(document.createTextNode(extras.join(' · ')));
+  if (clash) place.classList.add('clash');
   body.append(time, place);
 
   // The claim write has never been observed, and guessing at a request that
@@ -976,6 +995,25 @@ setInterval(() => {
 }, 30000);
 
 load();
+
+// Manual trigger. The server also syncs on every shift refresh, so this is for
+// when you want it now rather than within the minute.
+el.syncCal.addEventListener('click', async () => {
+  const previous = el.shiftsSummary.textContent;
+  el.syncCal.classList.add('working');
+  el.shiftsSummary.textContent = 'syncing…';
+
+  try {
+    const data = await api('/api/calendar/sync', { method: 'POST' });
+    el.shiftsSummary.textContent = `${data.synced} in ${data.calendar}`;
+  } catch (err) {
+    el.shiftsSummary.textContent = 'sync failed';
+    console.warn('calendar sync:', err.message);
+  } finally {
+    el.syncCal.classList.remove('working');
+    setTimeout(() => { el.shiftsSummary.textContent = previous; }, 2600);
+  }
+});
 
 el.payToggle.addEventListener('click', () => {
   payVisible = !payVisible;

@@ -13,5 +13,14 @@
     "saturday": "off"
   },
   "weeklyHourCap": null,
-  "_weeklyHourCap": "Warn when a week goes over this many hours. null disables it. On-campus student jobs are often capped at 20 during term."
+  "_weeklyHourCap": "Warn when a week goes over this many hours. null disables it. On-campus student jobs are often capped at 20 during term.",
+
+  "_pay": "Remove this block to hide the pay panel. nightFrom/nightTo are start hours, so 0-6 means a shift starting at midnight bills at the night rate. taxRate is your own effective withholding, taken off a real payslip, not a guess.",
+  "pay": null,
+
+  "_maps": "Station names are turned into Google Maps searches. campus is appended to sharpen the search. Put an override in stations only when Google resolves a name badly, e.g. \"INV Northwest 1\": \"42.3406,-71.0890\".",
+  "maps": {
+    "campus": "",
+    "stations": {}
+  }
 }

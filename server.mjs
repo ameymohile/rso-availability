@@ -10,7 +10,7 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 
@@ -181,6 +181,7 @@ const server = createServer(async (req, res) => {
         week: readWeek(template),
         weeklyHourCap: config.weeklyHourCap ?? null,
         pay: config.pay ?? null,
+        shiftBlocks: SHIFT_BLOCKS,
         at: new Date().toISOString(),
       });
     }

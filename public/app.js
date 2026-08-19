@@ -37,6 +37,11 @@ const el = {
   payNote: document.getElementById('payNote'),
   payToggle: document.getElementById('payToggle'),
   syncCal: document.getElementById('syncCal'),
+  backdrop: document.getElementById('backdrop'),
+  sheetTitle: document.getElementById('sheetTitle'),
+  sheetBody: document.getElementById('sheetBody'),
+  sheetOk: document.getElementById('sheetOk'),
+  sheetCancel: document.getElementById('sheetCancel'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -50,11 +55,54 @@ let openSeen = new Set();
 let checking = false;
 let lastSavedWeek = null;
 let weeklyHourCap = null;
+let shiftBlocks = [];
+let sheetDay = null;
 
 const label = (day) => day[0].toUpperCase() + day.slice(1);
-const isDirty = () => DAYS.some((d) => live[d] !== draft[d]);
-const countOn = (week) => DAYS.filter((d) => week[d] === 'all-day').length;
 const listDays = (days) => days.map(label).join(', ');
+
+// 480 -> "8am". Mirrors the server so a range reads the same on both sides.
+function minsLabel(minutes) {
+  const total = ((minutes % 1440) + 1440) % 1440;
+  const hour = Math.floor(total / 60);
+  const mins = total % 60;
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  const suffix = hour < 12 ? 'am' : 'pm';
+  return mins ? `${hour12}:${String(mins).padStart(2, '0')}${suffix}` : `${hour12}${suffix}`;
+}
+
+function merge(ranges) {
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [from, to] of sorted) {
+    const last = out.at(-1);
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else out.push([from, to]);
+  }
+  return out;
+}
+
+// A day is 'off', 'all-day', or ranges. Everything compares on this string so
+// the three forms are never checked by identity.
+function describe(value) {
+  if (!value || value === 'off') return 'off';
+  if (value === 'all-day') return 'all-day';
+
+  const ranges = merge(value);
+  if (!ranges.length) return 'off';
+  if (ranges.length === 1 && ranges[0][0] === 0 && ranges[0][1] >= 1440) return 'all-day';
+  return ranges.map(([from, to]) => `${minsLabel(from)}-${minsLabel(to)}`).join(', ');
+}
+
+const stateText = (value) => {
+  const shape = describe(value);
+  if (shape === 'off') return 'Off';
+  if (shape === 'all-day') return 'All day';
+  return shape;
+};
+
+const isDirty = () => DAYS.some((d) => describe(live[d]) !== describe(draft[d]));
+const countOn = (week) => DAYS.filter((d) => describe(week[d]) !== 'off').length;
 
 // Local YYYY-MM-DD. toISOString() would push an 8pm shift to the next day.
 const dateKey = (d) =>
@@ -131,7 +179,7 @@ function render() {
 }
 
 function buildRow(day) {
-  const on = draft[day] === 'all-day';
+  const on = describe(draft[day]) !== 'off';
 
   const row = document.createElement('div');
   row.className = `row${on ? ' on' : ''}`;
@@ -140,9 +188,16 @@ function buildRow(day) {
   name.className = 'day';
   name.textContent = label(day);
 
-  const state = document.createElement('span');
+  // The state is the way in to picking times, so it is a control, not a label.
+  const state = document.createElement('button');
+  state.type = 'button';
   state.className = 'state';
-  state.textContent = on ? 'All day' : 'Off';
+  state.textContent = stateText(draft[day]);
+  state.title = `Pick shifts for ${label(day)}`;
+  state.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!busy) openSheet(day);
+  });
 
   const wrap = document.createElement('label');
   wrap.className = 'switch';
@@ -152,10 +207,12 @@ function buildRow(day) {
   input.checked = on;
   input.disabled = busy;
   input.setAttribute('aria-label', `${label(day)} availability`);
+  // The switch is the coarse control: everything, or nothing. Times come from
+  // the sheet.
   input.addEventListener('change', () => {
     draft[day] = input.checked ? 'all-day' : 'off';
     row.classList.toggle('on', input.checked);
-    state.textContent = input.checked ? 'All day' : 'Off';
+    state.textContent = stateText(draft[day]);
     syncFooter();
   });
 
@@ -173,6 +230,78 @@ function buildRow(day) {
 
   return row;
 }
+
+/* ---------- slot sheet ---------- */
+
+const coveredBy = (block, ranges) =>
+  ranges.some(([from, to]) => from <= block.from && to >= block.to);
+
+function openSheet(day) {
+  sheetDay = day;
+  el.sheetTitle.textContent = label(day);
+
+  const shape = describe(draft[day]);
+  const ranges = shape === 'all-day'
+    ? [[0, 1440]]
+    : (Array.isArray(draft[day]) ? merge(draft[day]) : []);
+
+  el.sheetBody.replaceChildren(...shiftBlocks.map((block) => {
+    const row = document.createElement('label');
+    row.className = 'slot';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.dataset.code = block.code;
+    box.checked = coveredBy(block, ranges);
+
+    const code = document.createElement('span');
+    code.className = 'slot-code';
+    code.textContent = block.code;
+
+    const time = document.createElement('span');
+    time.className = 'slot-time';
+    time.textContent = `${minsLabel(block.from)} – ${minsLabel(block.to)}`;
+
+    row.append(box, code, time);
+    return row;
+  }));
+
+  el.backdrop.hidden = false;
+  el.sheetOk.focus();
+}
+
+const closeSheet = () => {
+  el.backdrop.hidden = true;
+  sheetDay = null;
+};
+
+function applySheet() {
+  if (!sheetDay) return;
+
+  const picked = shiftBlocks.filter(
+    (b) => el.sheetBody.querySelector(`input[data-code="${b.code}"]`)?.checked,
+  );
+
+  // All five is all day, which is what TeamWork stores as enabled with no slots.
+  if (!picked.length) draft[sheetDay] = 'off';
+  else if (picked.length === shiftBlocks.length) draft[sheetDay] = 'all-day';
+  else draft[sheetDay] = merge(picked.map((b) => [b.from, b.to]));
+
+  closeSheet();
+  render();
+}
+
+el.sheetOk.addEventListener('click', applySheet);
+el.sheetCancel.addEventListener('click', closeSheet);
+el.backdrop.addEventListener('click', (event) => {
+  if (event.target === el.backdrop) closeSheet();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (el.backdrop.hidden) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeSheet(); }
+  if (event.key === 'Enter') { event.preventDefault(); applySheet(); }
+});
 
 function syncFooter() {
   const dirty = isDirty();
@@ -881,6 +1010,7 @@ async function load() {
     verifiedAt = data.at;
     weeklyHourCap = data.weeklyHourCap ?? null;
     payConfig = data.pay ?? null;
+    shiftBlocks = data.shiftBlocks ?? [];
     render();
   } catch (err) {
     el.days.setAttribute('aria-busy', 'false');

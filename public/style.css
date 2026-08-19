@@ -907,3 +907,114 @@ kbd {
    one of these on screen at a time so it cannot compete with anything. */
 .agenda-item.next .dow { color: var(--text); }
 .soon { color: var(--accent); font-weight: 500; }
+
+/* ---------- slot sheet ---------- */
+
+/* The state doubles as the way in to picking times, so it looks tappable
+   without becoming a button-shaped thing in every row. */
+button.state {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+button.state:hover { background: var(--panel-2); color: var(--text); }
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  animation: fade 0.18s ease both;
+}
+
+.backdrop[hidden] { display: none; }
+
+.sheet {
+  width: 100%;
+  max-width: 320px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 0 var(--edge), 0 24px 60px rgba(0, 0, 0, 0.45);
+  animation: pop 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.sheet-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 640;
+  letter-spacing: -0.02em;
+}
+
+.sheet-note {
+  margin: 5px 0 14px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.slot:last-child { border-bottom: none; }
+.slot input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+.slot-code {
+  min-width: 22px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.slot-time { font-size: 14px; letter-spacing: -0.01em; }
+
+.sheet-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.sheet-btn {
+  flex: 1;
+  height: 36px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 590;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.sheet-btn:hover { background: var(--panel-2); }
+
+.sheet-btn.primary {
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  box-shadow: none;
+}
+
+.sheet-btn.primary:hover { opacity: 0.86; background: var(--btn-bg); }
+
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }

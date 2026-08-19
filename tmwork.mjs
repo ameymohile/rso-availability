@@ -13,7 +13,56 @@ export const DAY_ORDER = [
   'thursday', 'friday', 'saturday',
 ];
 
+// The five RSO shift blocks, as minutes past midnight. M sorts first because it
+// starts at midnight, so a full set collapses to 0-1440, which is all day.
+export const SHIFT_BLOCKS = [
+  { code: 'A', from: 480, to: 720 },
+  { code: 'B', from: 720, to: 960 },
+  { code: 'C1', from: 960, to: 1200 },
+  { code: 'C2', from: 1200, to: 1440 },
+  { code: 'M', from: 0, to: 480 },
+];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const pad = (n) => String(n).padStart(2, '0');
+
+// 480 -> "8am", 1440 -> "12am". Matches the string TeamWork writes itself.
+export function minutesToLabel(minutes) {
+  const total = ((minutes % 1440) + 1440) % 1440;
+  const hour = Math.floor(total / 60);
+  const mins = total % 60;
+  const suffix = hour < 12 ? 'am' : 'pm';
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return mins ? `${hour12}:${pad(mins)}${suffix}` : `${hour12}${suffix}`;
+}
+
+// TeamWork dates its slots to whatever day the form was rendered on, even for a
+// Sunday row, so the date carries no meaning and only the minutes matter.
+function slotIso(minutes) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setMinutes(minutes);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+}
+
+// Merges touching ranges so A+B becomes one 8am-4pm block rather than two.
+export function mergeRanges(ranges) {
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+  const merged = [];
+
+  for (const [from, to] of sorted) {
+    const last = merged.at(-1);
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else merged.push([from, to]);
+  }
+
+  return merged;
+}
+
+// Ranges the day is available for. 'off' and 'all-day' stay as strings because
+// they are what TeamWork itself stores: disabled, or enabled with no slots.
+export const rangesFor = (value) => (Array.isArray(value) ? mergeRanges(value) : []);
 
 // Local YYYY-MM-DD. toISOString() would shift an evening shift to the next day.
 const isoDate = (d) =>
@@ -143,15 +192,45 @@ export async function loadTemplate(session, config) {
       `No template named "${config.template}". Found: ${templates.map((t) => t.Title).join(', ')}`,
     );
   }
-  return { meta, template: await session.getJson(`/api/avail/template/0/${meta.Id}/?extraslots=2`) };
+  // Enough blank slots to write several ranges. The API returns the populated
+  // ones plus this many empties.
+  return { meta, template: await session.getJson(`/api/avail/template/0/${meta.Id}/?extraslots=5`) };
 }
 
+// A day is 'off', 'all-day', or a list of [fromMinutes, toMinutes] ranges.
+// 'all-day' is enabled with no slots, which is exactly how TeamWork stores it.
 export function readWeek(template) {
   const week = {};
+
   for (const day of template.Days) {
-    week[DAY_ORDER[day.DayIndex - 1]] = day.Enabled ? 'all-day' : 'off';
+    const name = DAY_ORDER[day.DayIndex - 1];
+
+    if (!day.Enabled) {
+      week[name] = 'off';
+      continue;
+    }
+
+    const ranges = (day.TimeSlots ?? [])
+      .filter((slot) => slot.MinStart !== null && slot.MinEnd !== null)
+      .map((slot) => [slot.MinStart, slot.MinEnd]);
+
+    week[name] = ranges.length ? mergeRanges(ranges) : 'all-day';
   }
+
   return week;
+}
+
+// Canonical string for a day, used for both change detection and readback
+// comparison so the three forms are never compared by identity.
+export function describeDay(value) {
+  if (value === 'off' || value === 'all-day') return value;
+
+  const ranges = mergeRanges(value);
+  if (!ranges.length) return 'off';
+  // A single range covering the whole day is all-day by another name.
+  if (ranges.length === 1 && ranges[0][0] === 0 && ranges[0][1] >= 1440) return 'all-day';
+
+  return ranges.map(([from, to]) => `${minutesToLabel(from)}-${minutesToLabel(to)}`).join(';');
 }
 
 // Mutates `template` in place, returning only what actually changed.
@@ -160,26 +239,73 @@ export function applyWeek(template, week) {
 
   for (const day of template.Days) {
     const name = DAY_ORDER[day.DayIndex - 1];
-    const want = String(week[name] ?? 'off').toLowerCase();
-    if (want !== 'off' && want !== 'all-day') {
-      throw new Error(`"${name}" is "${want}", but only "off" and "all-day" are supported`);
-    }
+    const raw = week[name] ?? 'off';
+    const want = describeDay(raw);
+    const before = describeDay(readDay(day));
 
-    const enabled = want === 'all-day';
-    const before = day.Enabled ? 'all-day' : 'off';
     if (before !== want) changes.push({ name, before, after: want });
 
-    day.Enabled = enabled;
-    day.Hours = enabled ? 24 : 0;
-    day.PrefHours = enabled ? 24 : 0;
-    day.AvailTimes = '';
-    // All-day carries no explicit slots, exactly as the real UI sends it.
-    for (const slot of day.TimeSlots) {
-      slot.MinStart = slot.MinEnd = slot.Start = slot.End = null;
+    if (want === 'off') {
+      setOff(day);
+    } else if (want === 'all-day') {
+      setAllDay(day);
+    } else {
+      setRanges(day, mergeRanges(raw));
     }
   }
 
   return changes;
+}
+
+function readDay(day) {
+  if (!day.Enabled) return 'off';
+  const ranges = (day.TimeSlots ?? [])
+    .filter((slot) => slot.MinStart !== null && slot.MinEnd !== null)
+    .map((slot) => [slot.MinStart, slot.MinEnd]);
+  return ranges.length ? ranges : 'all-day';
+}
+
+const clearSlots = (day) => {
+  for (const slot of day.TimeSlots) {
+    slot.MinStart = slot.MinEnd = slot.Start = slot.End = null;
+  }
+};
+
+function setOff(day) {
+  day.Enabled = false;
+  day.Hours = 0;
+  day.PrefHours = 0;
+  day.AvailTimes = '';
+  clearSlots(day);
+}
+
+function setAllDay(day) {
+  day.Enabled = true;
+  day.Hours = 24;
+  day.PrefHours = 24;
+  day.AvailTimes = '';
+  clearSlots(day);
+}
+
+function setRanges(day, ranges) {
+  if (ranges.length > day.TimeSlots.length) {
+    throw new Error(`${ranges.length} ranges needs ${ranges.length} slots, template returned ${day.TimeSlots.length}`);
+  }
+
+  day.Enabled = true;
+  day.Hours = ranges.reduce((sum, [from, to]) => sum + (to - from) / 60, 0);
+  // PrefHours is left alone. TeamWork's own UI does not touch it when a time is
+  // set, and the preferred window is not something this tool exposes.
+  day.AvailTimes = `${ranges.map(([from, to]) => `${minutesToLabel(from)}-${minutesToLabel(to)}`).join(';')};`;
+
+  clearSlots(day);
+  ranges.forEach(([from, to], i) => {
+    const slot = day.TimeSlots[i];
+    slot.MinStart = from;
+    slot.MinEnd = to;
+    slot.Start = slotIso(from);
+    slot.End = slotIso(to);
+  });
 }
 
 // A 200 on the PUT only means accepted, so the readback is the real proof.
@@ -187,8 +313,8 @@ function diffWeek(wanted, actual) {
   return DAY_ORDER
     .map((day) => ({
       day,
-      wanted: String(wanted[day] ?? 'off').toLowerCase(),
-      actual: actual[day],
+      wanted: describeDay(wanted[day] ?? 'off'),
+      actual: describeDay(actual[day] ?? 'off'),
     }))
     .filter((d) => d.wanted !== d.actual);
 }

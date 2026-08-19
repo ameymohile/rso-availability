@@ -154,6 +154,20 @@
     </footer>
   </div>
 
+  <!-- Slot picker. Editing a day is a decision you commit to, so it gets a
+       sheet with OK rather than mutating on every tick. -->
+  <div class="backdrop" id="backdrop" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <h2 class="sheet-title" id="sheetTitle">Day</h2>
+      <p class="sheet-note">Pick the shifts you can work. All five is the same as all day.</p>
+      <div class="sheet-body" id="sheetBody"></div>
+      <div class="sheet-actions">
+        <button class="sheet-btn" id="sheetCancel" type="button">Cancel</button>
+        <button class="sheet-btn primary" id="sheetOk" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="/app.js"></script>
 </body>
 </html>

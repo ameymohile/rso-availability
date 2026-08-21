@@ -103,7 +103,7 @@ export function judgeBoard(board, { mine = [], config = {}, now = Date.now() } =
 
 // Arming is deliberately in memory only. Restarting the server disarms, so a
 // bot can never outlive the process that was told to run it.
-export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, intervalMs = 45000 }) {
+export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, afterSweep, intervalMs = 45000 }) {
   if (intervalMs < MIN_INTERVAL_MS) {
     console.warn(`madmax: ${intervalMs}ms sweep clamped to ${MIN_INTERVAL_MS}ms`);
     intervalMs = MIN_INTERVAL_MS;
@@ -130,19 +130,28 @@ export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, inte
       const [board, mine] = await Promise.all([loadBoard(), loadMine()]);
       if (!board.length) return;
 
-      for (const { shift, take, why } of judgeBoard(board, { mine, config })) {
-        if (!take) {
-          record({ kind: 'skipped', shift: shift.id, station: shift.station, start: shift.start, why });
-          continue;
-        }
+      const verdicts = judgeBoard(board, { mine, config });
 
+      // Every claim leaves at once, and before anything else in this tick.
+      // Awaiting them in turn made the second shift on the board wait out the
+      // first round trip, which against somebody else's bot is the whole
+      // margin. The verdicts are all decided before any of them fires, so the
+      // weekly cap is still counted across candidates rather than raced.
+      const claims = verdicts.filter((v) => v.take).map(async ({ shift }) => {
         try {
           await claim(shift);
           record({ kind: 'claimed', shift: shift.id, station: shift.station, start: shift.start, hours: shift.hours });
         } catch (err) {
           record({ kind: 'failed', shift: shift.id, station: shift.station, start: shift.start, why: err.message });
         }
+      });
+
+      // Rejections are only worth logging, so they wait behind the claims.
+      for (const { shift, take, why } of verdicts) {
+        if (!take) record({ kind: 'skipped', shift: shift.id, station: shift.station, start: shift.start, why });
       }
+
+      await Promise.all(claims);
     } catch (err) {
       record({ kind: 'error', why: err.message });
 
@@ -153,6 +162,14 @@ export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, inte
         armed = false;
         clearInterval(timer);
         timer = null;
+      }
+    } finally {
+      // Upkeep belongs in the gap between sweeps, never in front of the next
+      // one. Failing at it must not take the sweep down with it.
+      try {
+        await afterSweep?.();
+      } catch (err) {
+        console.warn(`madmax: upkeep failed, ${err.message}`);
       }
     }
   }

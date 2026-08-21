@@ -37,6 +37,22 @@ async function getSession() {
 // request, and against the swap lockout the retry is actively harmful: the
 // board needs 30 minutes with nothing asking, so the second call restarts the
 // clock the first one started. That put the breaker below a retry that defeated it.
+// Signing in is four sequential requests: /signin, the POST, /emp/, then the
+// token scrape. That is a second or more, and a lazy session meant it landed in
+// front of whichever sweep happened to cross the TTL, delaying both the
+// detection and the claim on that sweep. Rotating an ageing session after a
+// sweep instead pays the cost in the idle gap. Only while armed, so an unused
+// server is not signing in on a timer.
+async function rotateSessionIfAgeing() {
+  if (!cached || Date.now() - cached.at < SESSION_TTL_MS * 0.8) return;
+  try {
+    cached = { session: await connect(config), at: Date.now() };
+  } catch {
+    // Better to make the next caller sign in than to hold a broken session.
+    cached = null;
+  }
+}
+
 const looksExpired = (err) => /\b401\b|invalid token|APP\.Token/i.test(err.message);
 
 async function withSession(fn) {
@@ -93,6 +109,7 @@ const madmax = createMadMax({
   loadBoard: () => boardShifts(),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
   claim: (shift) => withSession((s) => claimShift(s, shift)),
+  afterSweep: rotateSessionIfAgeing,
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
     appendJsonl(MADMAX_LOG, event);
@@ -130,7 +147,12 @@ async function boardShifts() {
   }
 
   try {
-    return await withSession((s) => loadOpenShifts(s));
+    const open = await withSession((s) => loadOpenShifts(s));
+    // Every board read feeds the log, not just the ones the UI asks for. This
+    // used to hang off the /api/open-shifts route, so the frequent reads (Mad
+    // Max sweeping) recorded nothing and the log stayed almost empty.
+    await noteBoardChange(open);
+    return open;
   } catch (err) {
     if (/disabled|idle required/i.test(err.message)) {
       swapBlockedUntil = Date.now() + SWAP_COOLDOWN_MS;
@@ -176,20 +198,43 @@ async function readHistory(limit = 20) {
 const BOARD_LOG = logPath('board-log.jsonl');
 let lastBoardSignature = null;
 
+// How long a shift survives on the board is the one number that decides whether
+// there is a race worth entering, and nothing was measuring it. Holding the
+// first sighting per id gives it directly on the way out.
+const firstSeen = new Map();
+
 async function noteBoardChange(shifts) {
   const signature = shifts.map((s) => s.id).sort().join(',');
   if (signature === lastBoardSignature) return;
 
   const previous = lastBoardSignature;
   lastBoardSignature = signature;
-  // First look after a restart is not a change, it is just the first look.
-  if (previous === null) return;
 
-  await appendJsonl(BOARD_LOG, {
-    at: new Date().toISOString(),
-    count: shifts.length,
-    shifts: shifts.map((s) => ({ id: s.id, start: s.start, station: s.station, hours: s.hours })),
-  });
+  const now = Date.now();
+  const present = new Set(shifts.map((s) => s.id));
+  const events = [];
+
+  for (const shift of shifts) {
+    if (firstSeen.has(shift.id)) continue;
+    firstSeen.set(shift.id, now);
+    events.push({
+      kind: 'appeared', shift: shift.id, station: shift.station,
+      start: shift.start, hours: shift.hours, mode: shift.mode,
+      // On the first look after a restart we are seeing the board, not a
+      // change, so the lifetime that follows is a floor and not a measurement.
+      ...(previous === null ? { sinceRestart: true } : {}),
+    });
+  }
+
+  for (const [id, seenAt] of firstSeen) {
+    if (present.has(id)) continue;
+    firstSeen.delete(id);
+    // Taken by somebody, by me, or pulled by a manager. Which one is unknown
+    // here, but the survival time is what the interval argument needs.
+    events.push({ kind: 'gone', shift: id, livedSeconds: Math.round((now - seenAt) / 1000) });
+  }
+
+  for (const event of events) await appendJsonl(BOARD_LOG, { at: new Date().toISOString(), ...event });
 }
 
 const MIME = {
@@ -282,7 +327,6 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
       const open = await boardShifts();
-      await noteBoardChange(open);
       return sendJson(res, 200, {
         shifts: open.map(withPlace),
         checkedAt: new Date().toISOString(),

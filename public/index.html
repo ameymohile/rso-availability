@@ -139,6 +139,18 @@
 
       <!-- Spans both columns. Hanging it under the left column made that side
            run far longer than the right and left a dead void at bottom right. -->
+      <!-- Arming starts a real bot, so it looks like one: monospace, live, and
+           impossible to switch on by brushing past it. -->
+      <div class="panel madmax" id="madmax">
+        <div class="mm-head">
+          <span class="mm-badge"><i></i>MAD&nbsp;MAX</span>
+          <span class="mm-state mono" id="mmState">disarmed</span>
+          <span class="mm-rules mono" id="mmRules"></span>
+          <button class="mm-btn" id="mmToggle" type="button">ARM</button>
+        </div>
+        <ul class="mm-log mono" id="mmLog" hidden></ul>
+      </div>
+
       <div class="panel" id="history" hidden>
         <div class="panel-head">
           <h2>Recent changes</h2>
@@ -164,6 +176,25 @@
       <div class="sheet-actions">
         <button class="sheet-btn" id="sheetCancel" type="button">Cancel</button>
         <button class="sheet-btn primary" id="sheetOk" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="backdrop" id="armBackdrop" hidden>
+    <div class="sheet arm-sheet" role="dialog" aria-modal="true" aria-labelledby="armTitle">
+      <h2 class="sheet-title" id="armTitle">Arm Mad Max</h2>
+      <p class="sheet-note">
+        A bot will watch the SwapBoard and take shifts on your behalf, without asking each time.
+      </p>
+      <ul class="arm-rules mono" id="armRules"></ul>
+      <p class="arm-warn" id="armWarn"></p>
+      <label class="arm-confirm">
+        <span class="mono">type ARM to confirm</span>
+        <input id="armInput" type="text" autocomplete="off" spellcheck="false" placeholder="ARM">
+      </label>
+      <div class="sheet-actions">
+        <button class="sheet-btn" id="armCancel" type="button">Cancel</button>
+        <button class="sheet-btn danger" id="armGo" type="button" disabled>ARM</button>
       </div>
     </div>
   </div>

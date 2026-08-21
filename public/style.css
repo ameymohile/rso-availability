@@ -1018,3 +1018,156 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- mad max ---------- */
+
+/* Deliberately unlike everything else. This one switches on a bot, so it should
+   never be mistaken for another settings row. */
+.madmax { border-color: var(--line); }
+
+.madmax.armed {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  box-shadow: inset 0 1px 0 var(--edge), 0 0 0 1px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.mm-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 18px;
+}
+
+.mm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--faint);
+}
+
+.mm-badge i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.madmax.armed .mm-badge { color: var(--danger); }
+.madmax.armed .mm-badge i { background: var(--danger); animation: pulse 1.1s ease-in-out infinite; }
+
+.mm-state { font-size: 11.5px; color: var(--faint); }
+.madmax.armed .mm-state { color: var(--danger); }
+
+.mm-rules {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.mm-btn {
+  flex: none;
+  height: 27px;
+  padding: 0 13px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mm-btn:hover { color: var(--text); background: var(--panel-2); }
+
+.mm-btn.live {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: none;
+}
+
+.mm-btn.live:hover { background: var(--danger); opacity: 0.88; color: #fff; }
+
+/* A running log, because a bot you cannot see is a bot you cannot trust. */
+.mm-log {
+  margin: 0;
+  padding: 4px 18px 12px;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.mm-line {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.mm-when { flex: none; opacity: 0.7; }
+.mm-kind { flex: none; min-width: 58px; }
+.mm-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.mm-line.claimed .mm-kind { color: var(--accent); }
+.mm-line.failed .mm-kind, .mm-line.error .mm-kind { color: var(--danger); }
+.mm-line.armed .mm-kind, .mm-line.disarmed .mm-kind { color: var(--muted); }
+
+/* ---------- arm sheet ---------- */
+
+.arm-sheet { max-width: 360px; }
+
+.arm-rules {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.arm-rules li {
+  padding: 5px 0 5px 14px;
+  position: relative;
+  border-bottom: 1px solid var(--line);
+}
+
+.arm-rules li:last-child { border-bottom: none; }
+.arm-rules li::before { content: '\2713'; position: absolute; left: 0; color: var(--accent); }
+
+.arm-warn {
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.arm-confirm { display: block; margin-bottom: 14px; }
+.arm-confirm span { display: block; font-size: 11px; color: var(--faint); margin-bottom: 6px; }
+
+.arm-confirm input {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+}
+
+.sheet-btn.danger { background: var(--danger); color: #fff; box-shadow: none; }
+.sheet-btn.danger:disabled { opacity: 0.4; cursor: not-allowed; }
+.sheet-btn.danger:hover:not(:disabled) { background: var(--danger); opacity: 0.88; }

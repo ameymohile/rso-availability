@@ -415,6 +415,18 @@ export async function loadShifts(session, { weeks = 4 } = {}) {
   return { shifts: all.filter((s) => s.at >= now), all };
 }
 
+// The one call that has never been observed. Every recon pass has found an
+// empty board, so the request that takes a shift is unknown. Guessing it would
+// mean firing an unverified write that commits Amey to real work, so it refuses
+// instead. To fill this in: with a shift on the board, run `node recon.mjs`,
+// claim it by hand, quit the browser, and the capture has the request.
+export async function claimShift(session, shift) {
+  throw new Error(
+    `claim not implemented: the SwapBoard claim request has never been captured `
+    + `(shift ${shift.id}). Run recon.mjs while claiming one by hand.`,
+  );
+}
+
 // swapboardCounts covers ~3 months in one request, so an empty board costs one
 // call. Only days with something get a detail fetch, which is rate limited.
 export async function loadOpenShifts(session) {

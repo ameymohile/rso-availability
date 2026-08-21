@@ -42,6 +42,17 @@ const el = {
   sheetBody: document.getElementById('sheetBody'),
   sheetOk: document.getElementById('sheetOk'),
   sheetCancel: document.getElementById('sheetCancel'),
+  madmax: document.getElementById('madmax'),
+  mmState: document.getElementById('mmState'),
+  mmRules: document.getElementById('mmRules'),
+  mmToggle: document.getElementById('mmToggle'),
+  mmLog: document.getElementById('mmLog'),
+  armBackdrop: document.getElementById('armBackdrop'),
+  armRules: document.getElementById('armRules'),
+  armWarn: document.getElementById('armWarn'),
+  armInput: document.getElementById('armInput'),
+  armGo: document.getElementById('armGo'),
+  armCancel: document.getElementById('armCancel'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -1036,6 +1047,7 @@ async function load() {
 
   refreshHistory();
   checkOpenShifts();
+  loadMadMax();
 }
 
 // The toggles are TeamWork's state, so a reset has to reach the page. Skipped
@@ -1168,6 +1180,127 @@ el.payToggle.addEventListener('click', () => {
   el.pay.classList.toggle('revealed', payVisible);
   paintPay(payVisible);
 });
+
+/* ---------- mad max ---------- */
+
+let mm = { armed: false, rules: {} };
+
+const hoursOfMinutes = (mins) => `${Math.round(mins / 60)}h`;
+
+const mmRuleText = (rules) => [
+  rules.maxHoursPerWeek ? `${rules.maxHoursPerWeek}h/wk cap` : null,
+  rules.minNoticeMinutes ? `${hoursOfMinutes(rules.minNoticeMinutes)} notice` : null,
+  rules.minGapMinutes ? `${hoursOfMinutes(rules.minGapMinutes)} gap` : null,
+  rules.skipOverlaps ? 'no overlaps' : null,
+  rules.blackoutDates?.length ? `${rules.blackoutDates.length} blackout` : null,
+].filter(Boolean).join(' · ');
+
+function renderMadMax() {
+  const { armed, lastRun, intervalMs, rules, log = [] } = mm;
+
+  el.madmax.classList.toggle('armed', armed);
+  el.mmToggle.textContent = armed ? 'DISARM' : 'ARM';
+  el.mmToggle.className = `mm-btn${armed ? ' live' : ''}`;
+  el.mmRules.textContent = mmRuleText(rules);
+
+  el.mmState.textContent = armed
+    ? `ARMED · every ${Math.round((intervalMs ?? 45000) / 1000)}s${lastRun ? ` · swept ${relativeTime(lastRun)}` : ''}`
+    : 'disarmed';
+
+  el.mmLog.hidden = !armed || !log.length;
+  el.mmLog.replaceChildren(...log.slice(0, 6).map((event) => {
+    const li = document.createElement('li');
+    li.className = `mm-line ${event.kind}`;
+
+    const when = document.createElement('span');
+    when.className = 'mm-when';
+    when.textContent = new Date(event.at).toLocaleTimeString(undefined, { hour12: false });
+
+    const kind = document.createElement('span');
+    kind.className = 'mm-kind';
+    kind.textContent = event.kind;
+
+    const what = document.createElement('span');
+    what.className = 'mm-what';
+    what.textContent = [event.station, event.why].filter(Boolean).join(' · ');
+
+    li.append(when, kind, what);
+    return li;
+  }));
+}
+
+async function loadMadMax() {
+  try {
+    mm = await api('/api/madmax');
+    renderMadMax();
+  } catch (err) {
+    console.warn('madmax state unavailable:', err.message);
+  }
+}
+
+function openArmSheet() {
+  el.armRules.replaceChildren(...[
+    mm.rules.maxHoursPerWeek && `will not pass ${mm.rules.maxHoursPerWeek}h in any week`,
+    mm.rules.minNoticeMinutes && `ignores shifts starting within ${hoursOfMinutes(mm.rules.minNoticeMinutes)}`,
+    mm.rules.skipOverlaps && 'never takes a shift overlapping one you hold',
+    mm.rules.minGapMinutes && `keeps ${hoursOfMinutes(mm.rules.minGapMinutes)} clear of shifts you hold, so no back-to-back`,
+    mm.rules.blackoutDates?.length
+      ? `skips ${mm.rules.blackoutDates.length} blacked-out date(s)`
+      : 'no blackout dates set',
+    'disarms itself if the server restarts',
+  ].filter(Boolean).map((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    return li;
+  }));
+
+  // Said in the product, not just the README. Arming something that cannot
+  // actually claim would otherwise look like it was working.
+  el.armWarn.textContent = 'Claiming is not wired up yet: the SwapBoard claim request has never been captured, '
+    + 'so every attempt will fail loudly and be logged. Detection and the guardrails are real.';
+
+  el.armInput.value = '';
+  el.armGo.disabled = true;
+  el.armBackdrop.hidden = false;
+  el.armInput.focus();
+}
+
+const closeArmSheet = () => { el.armBackdrop.hidden = true; };
+
+async function setArmed(armed) {
+  try {
+    mm = await api('/api/madmax', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ armed }),
+    });
+    renderMadMax();
+  } catch (err) {
+    console.warn('madmax toggle failed:', err.message);
+  }
+}
+
+el.mmToggle.addEventListener('click', () => {
+  if (mm.armed) setArmed(false);
+  else openArmSheet();
+});
+
+el.armInput.addEventListener('input', () => {
+  el.armGo.disabled = el.armInput.value.trim().toUpperCase() !== 'ARM';
+});
+
+el.armGo.addEventListener('click', () => {
+  closeArmSheet();
+  setArmed(true);
+});
+
+el.armCancel.addEventListener('click', closeArmSheet);
+el.armBackdrop.addEventListener('click', (event) => {
+  if (event.target === el.armBackdrop) closeArmSheet();
+});
+
+// While armed the panel is live state, so keep it moving.
+setInterval(() => { if (mm.armed) loadMadMax(); }, 15000);
 
 /* ---------- appearance ---------- */
 

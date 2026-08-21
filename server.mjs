@@ -10,9 +10,10 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
+import { createMadMax } from './madmax.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -78,15 +79,30 @@ async function getShifts({ allowStale = false } = {}) {
   return refreshShifts();
 }
 
-// JSONL because appending a line cannot corrupt the ones before it.
-const HISTORY = fileURLToPath(new URL('./history.jsonl', import.meta.url));
+// Armed state lives here and nowhere else, so restarting the server disarms it.
+const madmax = createMadMax({
+  config: config.madmax ?? {},
+  intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
+  loadBoard: () => withSession((s) => loadOpenShifts(s)),
+  loadMine: async () => (await getShifts({ allowStale: true })).all,
+  claim: (shift) => withSession((s) => claimShift(s, shift)),
+  onEvent: (event) => {
+    console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
+    appendJsonl(MADMAX_LOG, event);
+  },
+});
 
-async function appendHistory(entry) {
+// JSONL because appending a line cannot corrupt the ones before it.
+const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
+const HISTORY = logPath('history.jsonl');
+const MADMAX_LOG = logPath('madmax-log.jsonl');
+
+// Logs are a nicety. Never fail real work because one could not be written.
+async function appendJsonl(file, entry) {
   try {
-    await appendFile(HISTORY, `${JSON.stringify(entry)}\n`);
+    await appendFile(file, `${JSON.stringify(entry)}\n`);
   } catch (err) {
-    // A nicety. Never fail a save because the log could not be written.
-    console.error('history: could not append,', err.message);
+    console.error(`log append failed (${file}):`, err.message);
   }
 }
 
@@ -107,7 +123,7 @@ async function readHistory(limit = 20) {
 
 // Logged only on change, so it answers "when do shifts appear" rather than
 // filling with a line a minute saying nothing happened.
-const BOARD_LOG = fileURLToPath(new URL('./board-log.jsonl', import.meta.url));
+const BOARD_LOG = logPath('board-log.jsonl');
 let lastBoardSignature = null;
 
 async function noteBoardChange(shifts) {
@@ -119,15 +135,11 @@ async function noteBoardChange(shifts) {
   // First look after a restart is not a change, it is just the first look.
   if (previous === null) return;
 
-  try {
-    await appendFile(BOARD_LOG, `${JSON.stringify({
-      at: new Date().toISOString(),
-      count: shifts.length,
-      shifts: shifts.map((s) => ({ id: s.id, start: s.start, station: s.station, hours: s.hours })),
-    })}\n`);
-  } catch (err) {
-    console.error('board log: could not append,', err.message);
-  }
+  await appendJsonl(BOARD_LOG, {
+    at: new Date().toISOString(),
+    count: shifts.length,
+    shifts: shifts.map((s) => ({ id: s.id, start: s.start, station: s.station, hours: s.hours })),
+  });
 }
 
 const MIME = {
@@ -195,7 +207,7 @@ const server = createServer(async (req, res) => {
       const result = await withSession((session) => saveAndVerify(session, config, week));
 
       if (result.saved) {
-        await appendHistory({
+        await appendJsonl(HISTORY, {
           at: new Date().toISOString(),
           changes: result.changes,
           week: result.week,
@@ -235,6 +247,16 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/history' && req.method === 'GET') {
       return sendJson(res, 200, { history: await readHistory() });
+    }
+
+    if (pathname === '/api/madmax' && req.method === 'GET') {
+      return sendJson(res, 200, { ...madmax.state, rules: config.madmax ?? {} });
+    }
+
+    if (pathname === '/api/madmax' && req.method === 'POST') {
+      const { armed } = await readBody(req);
+      const state = armed ? madmax.arm() : madmax.disarm();
+      return sendJson(res, 200, { ...state, rules: config.madmax ?? {} });
     }
 
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {

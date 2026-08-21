@@ -7,3 +7,4 @@ recon-out/
 node_modules/
 .DS_Store
 *.log
+madmax-log.jsonl

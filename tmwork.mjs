@@ -181,6 +181,18 @@ function createSession(config) {
   return { signIn, getJson, putJson };
 }
 
+// Exported so a second watcher can keep its own secret in the same Keychain
+// entry style instead of inventing another place to hold a password. `optional`
+// is for the mail watch, which is a feature you can simply not configure.
+export function keychainPassword(account, { optional = false } = {}) {
+  try {
+    return getPassword(account);
+  } catch (err) {
+    if (optional) return null;
+    throw err;
+  }
+}
+
 export async function connect(config) {
   const session = createSession(config);
   await session.signIn(getPassword(config.employeeUser));

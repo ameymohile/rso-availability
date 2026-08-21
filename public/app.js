@@ -47,6 +47,12 @@ const el = {
   mmRules: document.getElementById('mmRules'),
   mmToggle: document.getElementById('mmToggle'),
   mmLog: document.getElementById('mmLog'),
+  mmWires: document.getElementById('mmWires'),
+  mmWirePush: document.getElementById('mmWirePush'),
+  mmWirePoll: document.getElementById('mmWirePoll'),
+  mmPushNote: document.getElementById('mmPushNote'),
+  mmPollNote: document.getElementById('mmPollNote'),
+  mmTallies: document.getElementById('mmTallies'),
   armBackdrop: document.getElementById('armBackdrop'),
   armRules: document.getElementById('armRules'),
   armWarn: document.getElementById('armWarn'),
@@ -1197,6 +1203,43 @@ const mmRuleText = (rules) => [
   rules.blackoutDates?.length ? `${rules.blackoutDates.length} blackout` : null,
 ].filter(Boolean).join(' · ');
 
+// The push path is the one that can win a one-second race, so its state is
+// spelled out rather than left to be inferred from whether claims happen.
+const PUSH_STATE = {
+  watching: ['live', 'watching'],
+  reconnecting: ['warn', 'reconnecting'],
+  unconfigured: ['off', 'not configured'],
+  off: ['off', 'off'],
+};
+
+function renderWires() {
+  const { armed, lastRun, lastCause, mail = {}, log = [] } = mm;
+  el.mmWires.hidden = !armed;
+  if (!armed) return;
+
+  const [pushClass, pushLabel] = PUSH_STATE[mail.state] ?? PUSH_STATE.off;
+  el.mmWirePush.className = `mm-wire ${pushClass}`;
+  el.mmPushNote.textContent = mail.lastTrigger
+    ? `${pushLabel} · fired ${relativeTime(mail.lastTrigger.at)}`
+    : mail.lastMail
+      ? `${pushLabel} · last mail ${relativeTime(mail.lastMail.at)}`
+      : pushLabel;
+
+  // Naming the cause matters: a sweep that ran because mail arrived is the fast
+  // path working, and one that ran on the clock is only the safety net.
+  el.mmWirePoll.className = 'mm-wire live';
+  el.mmPollNote.textContent = lastRun
+    ? `${relativeTime(lastRun)}${lastCause && lastCause !== 'poll' ? ` · via ${lastCause.split(':')[0]}` : ''}`
+    : 'idle';
+
+  const tally = (kind) => log.filter((e) => e.kind === kind).length;
+  el.mmTallies.textContent = [
+    `${tally('claimed')} claimed`,
+    `${tally('failed')} lost`,
+    `${tally('skipped')} skipped`,
+  ].join(' · ');
+}
+
 function renderMadMax() {
   const { armed, lastRun, intervalMs, rules, log = [] } = mm;
 
@@ -1213,8 +1256,10 @@ function renderMadMax() {
     ? `ARMED · every ${every}s${lastRun ? ` · swept ${relativeTime(lastRun)}` : ''}`
     : 'disarmed';
 
+  renderWires();
+
   el.mmLog.hidden = !armed || !log.length;
-  el.mmLog.replaceChildren(...log.slice(0, 6).map((event) => {
+  el.mmLog.replaceChildren(...log.slice(0, 8).map((event) => {
     const li = document.createElement('li');
     li.className = `mm-line ${event.kind}`;
 

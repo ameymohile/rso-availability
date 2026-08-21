@@ -1245,3 +1245,40 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 }
 
 .slide-arm.ready .slide-input::-webkit-slider-thumb { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 30%, transparent); }
+
+/* Which wire found the shift. Push and poll sit side by side because knowing
+   the fast path is alive is the difference between racing and hoping. */
+.mm-wires {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.mm-wire { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+
+.mm-wire-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.mm-wire.live .mm-wire-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+}
+
+.mm-wire.warn .mm-wire-dot { background: #d9a13b; }
+
+.mm-wire-name { color: var(--fg); letter-spacing: 0.06em; }
+.mm-wire.off .mm-wire-name { color: var(--faint); }
+.mm-wire-note { color: var(--faint); }
+
+/* Pushed to the far end so the counts read as a summary, not another wire. */
+.mm-tallies { margin-left: auto; font-size: 11px; color: var(--faint); }

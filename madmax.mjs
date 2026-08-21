@@ -347,6 +347,7 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
   let timer = null;
   let lastRun = null;
   let sweeping = false;
+  let lastCause = null;
   const log = [];
 
   // What this process has claimed, remembered until the schedule read catches
@@ -378,7 +379,7 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
     return event;
   };
 
-  async function sweep() {
+  async function sweep(cause = 'poll') {
     if (!armed) return;
 
     // setInterval does not wait for an async callback. A sweep can genuinely run
@@ -393,6 +394,7 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
 
     sweeping = true;
     lastRun = new Date().toISOString();
+    lastCause = cause;
 
     try {
       const [board, fresh] = await Promise.all([loadBoard(), loadMine()]);
@@ -508,14 +510,26 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
 
   return {
     get state() {
-      return { armed, lastRun, intervalMs, log: log.slice(0, 12) };
+      return { armed, lastRun, lastCause, intervalMs, log: log.slice(0, 12) };
     },
     arm() {
       if (armed) return this.state;
       armed = true;
       record({ kind: 'armed' });
-      timer = setInterval(sweep, intervalMs);
-      sweep();
+      timer = setInterval(() => sweep('poll'), intervalMs);
+      sweep('arm');
+      return this.state;
+    },
+
+    // Something outside the clock says the board changed, so look now rather
+    // than waiting out the interval. This is the whole point of the mail watch:
+    // a push arrives in well under a second, where a poll is blind for half the
+    // interval. Every guard still applies -- the re-entrancy lock, the breaker,
+    // the plan -- so a trigger cannot do anything a sweep could not.
+    trigger(reason = 'external') {
+      if (!armed) return this.state;
+      record({ kind: 'triggered', why: reason });
+      sweep(reason);
       return this.state;
     },
     disarm() {

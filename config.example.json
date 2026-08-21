@@ -30,6 +30,16 @@
     "stationWeights": {}
   },
 
+  "_mail": "Push instead of polling, and the only thing that can catch a shift that lives for a second. IMAP IDLE wakes the claimer the moment your mail server accepts a TeamWork notification, and it costs zero swapboard requests so it cannot trip the rate limit. Set host/user for wherever the notifications land (imap.gmail.com, or outlook.office365.com for a university account) and store the password the same way as the TeamWork one: security add-generic-password -s tmwork-rso -a YOUR_EMAIL -w. Gmail needs an app password, not your login password. Leave triggerSubject empty until you have seen the real subject line, because empty means every TeamWork mail triggers a look, which is the safe default. Delete this block to run on polling alone.",
+  "mail": {
+    "host": "imap.gmail.com",
+    "port": 993,
+    "user": "you@example.com",
+    "mailbox": "INBOX",
+    "from": "tmwork",
+    "triggerSubject": ""
+  },
+
   "_maps": "Station names are turned into Google Maps searches. campus is appended to sharpen the search. Put an override in stations only when Google resolves a name badly, e.g. \"INV Northwest 1\": \"42.3406,-71.0890\".",
   "maps": {
     "campus": "",

@@ -148,6 +148,21 @@
           <span class="mm-rules mono" id="mmRules"></span>
           <button class="mm-btn" id="mmToggle" type="button">ARM</button>
         </div>
+        <!-- Two ways it finds a shift, shown side by side, because which one is
+             working is the difference between winning a race and not. -->
+        <div class="mm-wires" id="mmWires" hidden>
+          <div class="mm-wire" id="mmWirePush">
+            <span class="mm-wire-dot"></span>
+            <span class="mm-wire-name mono">PUSH</span>
+            <span class="mm-wire-note mono" id="mmPushNote">not configured</span>
+          </div>
+          <div class="mm-wire" id="mmWirePoll">
+            <span class="mm-wire-dot"></span>
+            <span class="mm-wire-name mono">POLL</span>
+            <span class="mm-wire-note mono" id="mmPollNote">idle</span>
+          </div>
+          <div class="mm-tallies mono" id="mmTallies"></div>
+        </div>
         <ul class="mm-log mono" id="mmLog" hidden></ul>
       </div>
 

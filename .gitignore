@@ -10,3 +10,4 @@ node_modules/
 madmax-log.jsonl
 server.log
 .swap-lockout
+mail-log.jsonl

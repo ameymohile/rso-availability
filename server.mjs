@@ -15,6 +15,9 @@ import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 import { createMadMax } from './madmax.mjs';
 import { notify } from './notify.mjs';
+import { createMailWatch } from './mailwatch.mjs';
+import { createGate } from './gate.mjs';
+import { keychainPassword } from './tmwork.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -69,6 +72,7 @@ async function withSession(fn) {
 // calls, so the result is held briefly and shared with the UI.
 const SHIFTS_TTL_MS = 5 * 60 * 1000;
 let shiftCache = null;
+let lastSyncedSchedule = null;
 
 const withPlace = (shift) => ({ ...shift, ...locateStation(shift.station, config.maps) });
 
@@ -81,12 +85,20 @@ async function refreshShifts() {
   const data = { shifts: shifts.map(withPlace), all: all.map(withPlace) };
   shiftCache = { data, at: Date.now() };
 
-  // Push into Calendar whenever the schedule is re-read, which is what makes
-  // this automatic. Never let a Calendar failure break serving shifts.
-  if (config.calendar?.autoSync) {
+  // Only when the schedule actually changed. A sync deletes and recreates every
+  // RSO event, and this used to fire on every re-read: four times during a
+  // single boot, which on a phone subscribed to that calendar is four rounds of
+  // alerts for shifts that did not move.
+  const signature = data.all.map((s) => `${s.id}@${s.start}-${s.end}`).sort().join('|');
+  if (config.calendar?.autoSync && signature !== lastSyncedSchedule) {
+    lastSyncedSchedule = signature;
     syncCalendar(data.all, config.calendar)
       .then(({ synced }) => console.log(`calendar: synced ${synced} shifts`))
-      .catch((err) => console.error('calendar sync failed,', err.message));
+      .catch((err) => {
+        // Let the next refresh try again rather than staying quiet until a change.
+        lastSyncedSchedule = null;
+        console.error('calendar sync failed,', err.message);
+      });
   }
 
   return data;
@@ -146,6 +158,21 @@ const madmax = createMadMax({
   },
 });
 
+// Push, not polling. A shift that lives a second is invisible to any safe poll
+// rate, so the interval becomes a safety net and this becomes the fast path.
+const mailWatch = createMailWatch({
+  config: config.mail ?? {},
+  password: config.mail?.user ? keychainPassword(config.mail.user, { optional: true }) : null,
+  onTrigger: (reason) => madmax.trigger(reason),
+  onEvent: (event) => {
+    if (event.kind === 'mail-status') return;
+    console.log(`mail: ${event.kind}${event.subject ? ` ${event.subject}` : ''}${event.why ? ` (${event.why})` : ''}`);
+    // Kept even when it does not trigger. If a shift is posted and no mail
+    // arrives, this file is the evidence that email is not the route.
+    appendJsonl(MAIL_LOG, { at: new Date().toISOString(), ...event });
+  },
+});
+
 // TeamWork revokes board access with "Swap list disabled. (30) minutes idle
 // required for reset." Because any request restarts that 30 minutes, one shared
 // breaker has to hold every caller off, not just the one that tripped it.
@@ -189,11 +216,17 @@ function noteSwapRefusal(err) {
 const restingError = () =>
   new Error(`swap list locked out, resting until ${new Date(swapBlockedUntil).toLocaleTimeString()}`);
 
+// 1.6s is the server's declared 1.5s floor with a little rounding up. Every
+// board read from every caller queues through one gate, so the UI poll, the
+// armed sweep and a mail trigger arriving mid-sweep cannot land on top of each
+// other. See gate.mjs for why this is serialised and not merely rate limited.
+const boardGate = createGate({ spacingMs: 1600 });
+
 async function boardShifts() {
   if (swapLocked()) throw restingError();
 
   try {
-    const open = await withSession((s) => loadOpenShifts(s));
+    const open = await boardGate.run(() => withSession((s) => loadOpenShifts(s)));
     // Every board read feeds the log, not just the ones the UI asks for. This
     // used to hang off the /api/open-shifts route, so the frequent reads (Mad
     // Max sweeping) recorded nothing and the log stayed almost empty.
@@ -220,6 +253,7 @@ async function swapWrite(fn) {
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const HISTORY = logPath('history.jsonl');
 const MADMAX_LOG = logPath('madmax-log.jsonl');
+const MAIL_LOG = logPath('mail-log.jsonl');
 
 // Logs are a nicety. Never fail real work because one could not be written.
 async function appendJsonl(file, entry) {
@@ -413,7 +447,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/madmax' && req.method === 'GET') {
-      return sendJson(res, 200, { ...madmax.state, rules: config.madmax ?? {} });
+      return sendJson(res, 200, { ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status });
     }
 
     if (pathname === '/api/madmax' && req.method === 'POST') {
@@ -451,4 +485,20 @@ server.listen(PORT, HOST, () => {
   console.log(`RSO availability UI  ->  http://${HOST}:${PORT}`);
   // Warm the cache so the first calendar poll never waits on a cold sign-in.
   refreshShifts().catch((err) => console.error('warm-up failed,', err.message));
+
+  // Watching costs nothing at TeamWork, so it runs whether or not Mad Max is
+  // armed: the log then answers "does a posted shift even generate mail" long
+  // before anyone needs the trigger to work.
+  mailWatch.start();
+  const mail = mailWatch.status;
+  console.log(mail.configured
+    ? `mail watch: ${config.mail.user} via ${config.mail.host}`
+    : 'mail watch: not configured (see config.example.json "mail")');
 });
+
+// A watcher holding an IMAP socket would otherwise keep the process alive.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    mailWatch.stop().finally(() => process.exit(0));
+  });
+}

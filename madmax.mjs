@@ -49,6 +49,13 @@ export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) 
 
   const day = shift.start.slice(0, 10);
 
+  // Not every row on the board is a race. A bid is awarded by a manager later
+  // and a trade costs a shift in return, so firing a claim at either is wrong
+  // no matter how fast we are. Absent on shifts that predate the field.
+  if (shift.mode && shift.mode !== 'claim') {
+    return { take: false, why: `not a one-click claim (${shift.mode})` };
+  }
+
   if (blackoutDates.includes(day)) return { take: false, why: `${day} is blacked out` };
 
   if (shift.at - now < minNoticeMinutes * MINUTE) {

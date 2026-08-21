@@ -33,11 +33,17 @@ async function getSession() {
   return session;
 }
 
-// Any failure may just be an expired session, so retry once with a fresh one.
+// Only an expired session is worth retrying. Retrying anything else doubles the
+// request, and against the swap lockout the retry is actively harmful: the
+// board needs 30 minutes with nothing asking, so the second call restarts the
+// clock the first one started. That put the breaker below a retry that defeated it.
+const looksExpired = (err) => /\b401\b|invalid token|APP\.Token/i.test(err.message);
+
 async function withSession(fn) {
   try {
     return await fn(await getSession());
   } catch (err) {
+    if (!looksExpired(err)) throw err;
     cached = null;
     return fn(await getSession());
   }

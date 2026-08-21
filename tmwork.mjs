@@ -362,6 +362,18 @@ export function locateStation(station, { campus = '', stations = {}, aliases = {
 }
 
 // Only Start/End/Hours/StnName are relied on. The payload carries ~80 fields.
+// Which button the SwapBoard would put on this row. Only 'claim' is a one-click
+// take: a bid is awarded by a manager later and a trade costs a shift in
+// return, so neither is something a sweep can win by being fast. Calendar
+// shifts carry none of these fields, hence the defaults.
+const claimMode = (item) => {
+  if (item.IsMe) return 'mine';
+  if (item.CanSwap === false) return 'locked';
+  if (item.BidBoardId != null) return 'bid';
+  if ((item.DataType ?? 0) > 9) return 'trade';
+  return 'claim';
+};
+
 const toShift = (item) => ({
   id: item.Id,
   start: item.Start,
@@ -369,6 +381,13 @@ const toShift = (item) => ({
   hours: item.Hours,
   station: item.StnName,
   at: new Date(item.Start).getTime(),
+  // Every button in the board's action template carries data-id, data-bid
+  // (LocId) and data-cs (CheckSum), so a claim needs all three. CheckSum only
+  // appears in the swapboard detail response, which is why swapboardCounts can
+  // detect a shift on its own but can never take one.
+  locId: item.LocId ?? null,
+  checkSum: item.CheckSum ?? null,
+  mode: claimMode(item),
 });
 
 // The agenda wants the weeks ahead; pay wants every week the month touches,
@@ -432,20 +451,59 @@ export async function claimShift(session, shift) {
   );
 }
 
+// Remembering the previous per-week counts is what lets a sweep tell a week
+// that just gained a shift from one that has been sitting there all along.
+let lastWeekCounts = new Map();
+
 // swapboardCounts covers ~3 months in one request, so an empty board costs one
-// call. Only days with something get a detail fetch, which is rate limited.
+// call. Only weeks with something get a detail fetch, which is rate limited.
 export async function loadOpenShifts(session) {
   const counts = await session.getJson(
     `/api/shift/swapboardCounts?date=${isoDate(new Date())}&fillgaps=true`,
   );
   const active = (counts ?? []).filter((day) => (day.SwapCount ?? 0) > 0 || day.SwapToYou);
 
+  // range=day returns that day alone, so a board spread over four days used to
+  // cost four throttled calls and 4.8s of sleep before the last one was even
+  // seen. range=week covers all of them, and the board itself defaults to it.
+  // Any date in the week works; anchoring on the Sunday makes weeks dedupe.
+  const weeks = new Map();
+  const offeredOn = new Set();
+
+  for (const day of active) {
+    const date = day.Date.slice(0, 10);
+    if (day.SwapToYou) offeredOn.add(date);
+
+    const anchor = isoDate(startOfWeek(`${date}T00:00:00`));
+    const week = weeks.get(anchor) ?? { anchor, count: 0, offered: false };
+    week.count += day.SwapCount ?? 0;
+    week.offered = week.offered || Boolean(day.SwapToYou);
+    weeks.set(anchor, week);
+  }
+
+  // Fetch the interesting week first. Offered-to-me outranks everything, then
+  // whatever grew since the last sweep, so a new shift never waits behind the
+  // throttle for weeks that have not changed.
+  const rank = (w) => {
+    if (w.offered) return 0;
+    return w.count > (lastWeekCounts.get(w.anchor) ?? 0) ? 1 : 2;
+  };
+  const ordered = [...weeks.values()].sort((a, b) => rank(a) - rank(b));
+  lastWeekCounts = new Map(ordered.map((w) => [w.anchor, w.count]));
+
   const shifts = [];
-  for (const [index, day] of active.entries()) {
+  const seen = new Set();
+
+  for (const [index, week] of ordered.entries()) {
     if (index) await sleep(SWAPBOARD_THROTTLE_MS);
-    const items = await session.getJson(`/api/shift/swapboard?date=${day.Date.slice(0, 10)}&range=day`);
+    const items = await session.getJson(`/api/shift/swapboard?date=${week.anchor}&range=week`);
+
     for (const item of items ?? []) {
-      if (item?.Start) shifts.push({ ...toShift(item), offeredTo: Boolean(day.SwapToYou) });
+      if (!item?.Start || seen.has(item.Id)) continue;
+      seen.add(item.Id);
+      // SwapToYou belongs to a day, not a week, so it has to be matched back to
+      // the shift's own date rather than the week that was requested.
+      shifts.push({ ...toShift(item), offeredTo: offeredOn.has(item.Start.slice(0, 10)) });
     }
   }
 

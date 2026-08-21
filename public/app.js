@@ -1241,11 +1241,17 @@ function renderWires() {
 
   // A gap outranks the counts. Closing the lid suspends the whole thing, and
   // "swept just now" after waking would claim coverage that never happened.
+  // Losing the wake assertion outranks even that, because then every future
+  // sweep is in doubt rather than one past window.
   const gap = mm.lastGap;
-  el.mmTallies.classList.toggle('warn', Boolean(gap));
-  el.mmTallies.textContent = gap
-    ? `asleep ${gap.minutes} min, missed anything posted then · ${counts}`
-    : counts;
+  const warn = !mm.awake || Boolean(gap);
+  el.mmTallies.classList.toggle('warn', warn);
+
+  el.mmTallies.textContent = !mm.awake
+    ? `this Mac can sleep, so it will stop looking · ${counts}`
+    : gap
+      ? `asleep ${gap.minutes} min, missed anything posted then · ${counts}`
+      : counts;
 }
 
 function renderMadMax() {

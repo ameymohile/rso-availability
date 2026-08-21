@@ -337,7 +337,7 @@ export const judgeBoard = planBoard;
 
 // Arming is deliberately in memory only. Restarting the server disarms, so a
 // bot can never outlive the process that was told to run it.
-export function createMadMax({ config, loadBoard, loadMine, claim, check, onEvent, afterSweep, intervalMs = 45000 }) {
+export function createMadMax({ config, loadBoard, loadMine, claim, check, onEvent, afterSweep, onArmChange, intervalMs = 45000 }) {
   if (intervalMs < MIN_INTERVAL_MS) {
     console.warn(`madmax: ${intervalMs}ms sweep clamped to ${MIN_INTERVAL_MS}ms`);
     intervalMs = MIN_INTERVAL_MS;
@@ -516,6 +516,9 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
       if (armed) return this.state;
       armed = true;
       record({ kind: 'armed' });
+      // An armed bot on a sleeping laptop is not a bot, so the machine is held
+      // awake for exactly as long as it is armed and no longer.
+      onArmChange?.(true);
       timer = setInterval(() => sweep('poll'), intervalMs);
       sweep('arm');
       return this.state;
@@ -545,6 +548,9 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
       armed = false;
       clearInterval(timer);
       timer = null;
+      // Let the machine sleep again. A tool that quietly stops a laptop sleeping
+      // forever is worse than one that misses a shift.
+      onArmChange?.(false);
       record({ kind: 'disarmed' });
       return this.state;
     },

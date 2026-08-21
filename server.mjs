@@ -18,6 +18,7 @@ import { notify } from './notify.mjs';
 import { createMailWatch } from './mailwatch.mjs';
 import { createGate } from './gate.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
+import { createAwake } from './awake.mjs';
 import { keychainPassword } from './tmwork.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
@@ -119,6 +120,17 @@ async function getShifts({ allowStale = false } = {}) {
   return refreshShifts();
 }
 
+// Held only while armed. See awake.mjs: this stops idle sleep, which is what was
+// making an ARMED panel meaningless, but it cannot stop lid-close sleep.
+const awake = createAwake({
+  onEvent: (event) => {
+    console.log(`awake: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
+    if (event.kind === 'awake-lost') {
+      madmax.note({ kind: 'error', why: 'lost the wake assertion, the machine can sleep again' });
+    }
+  },
+});
+
 // Armed state lives here and nowhere else, so restarting the server disarms it.
 const madmax = createMadMax({
   config: config.madmax ?? {},
@@ -135,6 +147,7 @@ const madmax = createMadMax({
   },
   check: (shift) => swapWrite((s) => checkClaim(s, shift)),
   afterSweep: rotateSessionIfAgeing,
+  onArmChange: (armed) => (armed ? awake.hold() : awake.release()),
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
     appendJsonl(MADMAX_LOG, event);
@@ -471,7 +484,7 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/madmax' && req.method === 'GET') {
       return sendJson(res, 200, {
-        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap,
+        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap, awake: awake.held,
       });
     }
 
@@ -526,6 +539,7 @@ server.listen(PORT, HOST, () => {
 // A watcher holding an IMAP socket would otherwise keep the process alive.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    awake.release();
     mailWatch.stop().finally(() => process.exit(0));
   });
 }

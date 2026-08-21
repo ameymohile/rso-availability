@@ -34,11 +34,23 @@ Re-running `install.sh` is safe, it skips whatever is already done.
 
 ## Run it
 
+The server runs as a launchd agent, so it is always up and survives logout,
+reboots and being killed. `rso` just opens the page.
+
 ```sh
 rso
 ```
 
-Opens http://127.0.0.1:8123. Ctrl+C stops it.
+Managing the agent:
+
+```sh
+launchctl unload ~/Library/LaunchAgents/local.rso.availability.plist   # stop
+launchctl load   ~/Library/LaunchAgents/local.rso.availability.plist   # start
+tail -f server.log                                                    # watch
+```
+
+Mad Max still disarms whenever the server restarts, so KeepAlive cannot bring an
+armed bot back to life. Arming is always a deliberate act.
 
 ## What it does
 

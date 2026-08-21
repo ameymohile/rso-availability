@@ -20,8 +20,12 @@ const MINUTE = 60000;
 const MIN_INTERVAL_MS = 30000;
 
 // Retrying while locked out resets the idle timer, so this must stop the sweep
-// rather than back off.
-const LOCKOUT = /disabled|idle required/i;
+// rather than back off. "locked out" is here because the breaker raises its own
+// message once it has tripped, and without it a re-arm during the cooldown kept
+// sweeping: the bot never recognised the refusal it had caused itself.
+const LOCKOUT = /disabled|idle required|locked out/i;
+
+const DAY = 86400000;
 
 // How many times a sweep will re-plan around lost races before it stops. Each
 // round costs a round trip per claim, and the pool strictly shrinks, so this is
@@ -56,6 +60,7 @@ export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) 
     minGapMinutes = 0,
     skipOverlaps = true,
     blackoutDates = [],
+    horizonDays = 90,
   } = config;
 
   // A shift whose times will not parse cannot be judged at all. Refusing it out
@@ -65,6 +70,14 @@ export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) 
   if (!Number.isFinite(new Date(shift.start).getTime())
     || !Number.isFinite(new Date(shift.end).getTime())) {
     return { take: false, why: `unparseable times (${shift.start} to ${shift.end})` };
+  }
+
+  // The board reaches about 84 days out; the schedule read that fills `mine`
+  // covers less. Past the end of `mine`, hoursIn() returns 0 and every rule that
+  // consults it silently passes: the week looks empty, nothing can overlap, and
+  // the full cap looks free. A shift we cannot check is one we must not take.
+  if (shift.at - now > horizonDays * DAY) {
+    return { take: false, why: `${Math.round((shift.at - now) / DAY)} days out, past the ${horizonDays}-day horizon I can verify` };
   }
 
   const day = shift.start.slice(0, 10);
@@ -261,7 +274,29 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
   let armed = false;
   let timer = null;
   let lastRun = null;
+  let sweeping = false;
   const log = [];
+
+  // What this process has claimed, remembered until the schedule read catches
+  // up. loadMine is served from a 5 minute cache, so without this the sweep 30
+  // seconds after a claim does not know about it: the cap looks 8h freer than it
+  // is and the same week gets claimed twice. Server-side confirmation is the
+  // real answer, this is the belt to that braces.
+  const CLAIM_MEMORY_MS = 15 * MINUTE;
+  let claimed = [];
+
+  const rememberClaim = (shift) => {
+    claimed = [...claimed.filter((c) => c.rememberedAt > Date.now() - CLAIM_MEMORY_MS), { shift, rememberedAt: Date.now() }];
+  };
+
+  // Union of what the server says I hold and what I know I just took.
+  const everythingHeld = (mine) => {
+    const known = new Set(mine.map((s) => s.id));
+    return [
+      ...mine,
+      ...claimed.filter((c) => c.rememberedAt > Date.now() - CLAIM_MEMORY_MS && !known.has(c.shift.id)).map((c) => c.shift),
+    ];
+  };
 
   const record = (entry) => {
     const event = { at: new Date().toISOString(), ...entry };
@@ -273,12 +308,25 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
 
   async function sweep() {
     if (!armed) return;
+
+    // setInterval does not wait for an async callback. A sweep can genuinely run
+    // past 30s: the detail fetches are spaced 1.6s apart, so a board spanning
+    // several weeks is seconds of sleep before the claims and the session
+    // rotation even start. Two sweeps in flight would read the board inside the
+    // 1.5s throttle and could fire two claims at the same shift.
+    if (sweeping) {
+      console.warn('madmax: previous sweep still running, skipping this tick');
+      return;
+    }
+
+    sweeping = true;
     lastRun = new Date().toISOString();
 
     try {
-      const [board, mine] = await Promise.all([loadBoard(), loadMine()]);
+      const [board, fresh] = await Promise.all([loadBoard(), loadMine()]);
       if (!board.length) return;
 
+      const mine = everythingHeld(fresh);
       let held = [...mine];
       let pool = board;
       let plan = [];
@@ -321,10 +369,16 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
             }
 
             await claim(shift);
+            rememberClaim(shift);
             record({ kind: 'claimed', ...where, hours: shift.hours });
             return { shift, won: true };
           } catch (err) {
             record({ kind: 'failed', ...where, why: err.message });
+            // A refusal here is usually just a lost race, but it can also be the
+            // lockout, and this catch is inside Promise.all so it never reaches
+            // the outer one. Left unchecked the sweep would carry on re-planning
+            // and fire more writes into a board that has already cut us off.
+            if (LOCKOUT.test(err.message)) throw err;
             return { shift, won: false };
           }
         }));
@@ -364,12 +418,18 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
         timer = null;
       }
     } finally {
+      sweeping = false;
+
       // Upkeep belongs in the gap between sweeps, never in front of the next
-      // one. Failing at it must not take the sweep down with it.
-      try {
-        await afterSweep?.();
-      } catch (err) {
-        console.warn(`madmax: upkeep failed, ${err.message}`);
+      // one. Failing at it must not take the sweep down with it. Skipped once
+      // disarmed, so a stand-down's last act is not a burst of sign-in traffic
+      // at a board that has just cut us off.
+      if (armed) {
+        try {
+          await afterSweep?.();
+        } catch (err) {
+          console.warn(`madmax: upkeep failed, ${err.message}`);
+        }
       }
     }
   }

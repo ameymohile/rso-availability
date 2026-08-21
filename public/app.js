@@ -1260,10 +1260,16 @@ function openArmSheet() {
     return li;
   }));
 
-  // Said in the product, not just the README. Arming something that cannot
-  // actually claim would otherwise look like it was working.
-  el.armWarn.textContent = 'Claiming is not wired up yet: the SwapBoard claim request has never been captured, '
-    + 'so every attempt will fail loudly and be logged. Detection and the guardrails are real.';
+  // Said in the product, not just the README, and it has to track what the
+  // server will actually do. This text used to promise that claiming was not
+  // wired up long after it was, which is the worst possible thing for a
+  // confirmation dialog to be wrong about.
+  el.armWarn.textContent = mm.rules?.checkOnly
+    ? 'Check-only: it will find shifts and ask the server whether it could take them, '
+      + 'but it will not take them. Nothing gets claimed and nothing is committed.'
+    : 'This claims real shifts on your behalf, and a claim commits you to the work. '
+      + 'The claim request was reconstructed from TeamWork’s own client and has never been '
+      + 'confirmed against a live shift, so watch the first one.';
 
   resetSlider();
   el.armBackdrop.hidden = false;

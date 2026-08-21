@@ -7,7 +7,7 @@
 
 import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
@@ -73,7 +73,11 @@ let shiftCache = null;
 const withPlace = (shift) => ({ ...shift, ...locateStation(shift.station, config.maps) });
 
 async function refreshShifts() {
-  const { shifts, all } = await withSession((s) => loadShifts(s));
+  // The board reaches ~84 days out. Reading only 4 weeks of my own schedule left
+  // the cap and overlap rules blind past that, so they silently passed on
+  // anything further out. 13 weeks covers the board. This is the calendar
+  // endpoint, not the throttled swap one.
+  const { shifts, all } = await withSession((s) => loadShifts(s, { weeks: 13 }));
   const data = { shifts: shifts.map(withPlace), all: all.map(withPlace) };
   shiftCache = { data, at: Date.now() };
 
@@ -108,8 +112,15 @@ const madmax = createMadMax({
   intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
   loadBoard: () => boardShifts(),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
-  claim: (shift) => withSession((s) => claimShift(s, shift)),
-  check: (shift) => withSession((s) => checkClaim(s, shift)),
+  claim: async (shift) => {
+    const result = await swapWrite((s) => claimShift(s, shift));
+    // What I hold just changed, so the 5 minute cache is wrong now. Leaving it
+    // meant the next sweep planned against a schedule missing the shift it had
+    // just taken, and claimed straight through the weekly cap.
+    shiftCache = null;
+    return result;
+  },
+  check: (shift) => swapWrite((s) => checkClaim(s, shift)),
   afterSweep: rotateSessionIfAgeing,
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
@@ -139,13 +150,47 @@ const madmax = createMadMax({
 // required for reset." Because any request restarts that 30 minutes, one shared
 // breaker has to hold every caller off, not just the one that tripped it.
 const SWAP_COOLDOWN_MS = 31 * 60 * 1000;
-let swapBlockedUntil = 0;
+const LOCKOUT_FILE = fileURLToPath(new URL('./.swap-lockout', import.meta.url));
+
+// Held on disk, not just in memory. launchd runs this with KeepAlive, so a crash
+// five minutes into the rest used to come back with a clean breaker and start
+// poking the board again during the one window where silence is the whole point.
+let swapBlockedUntil = (() => {
+  try {
+    const until = Number(readFileSync(LOCKOUT_FILE, 'utf8').trim());
+    if (Number.isFinite(until) && until > Date.now()) {
+      console.warn(`swapboard still resting until ${new Date(until).toLocaleTimeString()}`);
+      return until;
+    }
+  } catch { /* no lockout on record */ }
+  return 0;
+})();
+
+const swapLocked = () => Date.now() < swapBlockedUntil;
+
+// Any swap endpoint can hand back the lockout, not just the board read, so this
+// is shared. The claim path in particular used to swallow it inside Promise.all
+// and carry on issuing writes at a board that had already cut us off.
+function noteSwapRefusal(err) {
+  if (!/disabled|idle required/i.test(err.message)) return;
+
+  swapBlockedUntil = Date.now() + SWAP_COOLDOWN_MS;
+  try {
+    writeFileSync(LOCKOUT_FILE, String(swapBlockedUntil));
+  } catch (writeErr) {
+    console.error('could not persist the lockout:', writeErr.message);
+  }
+
+  madmax.disarm();
+  notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
+  console.error('swapboard locked out, resting 31 min');
+}
+
+const restingError = () =>
+  new Error(`swap list locked out, resting until ${new Date(swapBlockedUntil).toLocaleTimeString()}`);
 
 async function boardShifts() {
-  if (Date.now() < swapBlockedUntil) {
-    const until = new Date(swapBlockedUntil).toLocaleTimeString();
-    throw new Error(`swap list locked out, resting until ${until}`);
-  }
+  if (swapLocked()) throw restingError();
 
   try {
     const open = await withSession((s) => loadOpenShifts(s));
@@ -155,12 +200,18 @@ async function boardShifts() {
     await noteBoardChange(open);
     return open;
   } catch (err) {
-    if (/disabled|idle required/i.test(err.message)) {
-      swapBlockedUntil = Date.now() + SWAP_COOLDOWN_MS;
-      madmax.disarm();
-      notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
-      console.error('swapboard locked out, resting 31 min');
-    }
+    noteSwapRefusal(err);
+    throw err;
+  }
+}
+
+// Claiming and checking are swap endpoints too, so they sit behind the same gate.
+async function swapWrite(fn) {
+  if (swapLocked()) throw restingError();
+  try {
+    return await withSession(fn);
+  } catch (err) {
+    noteSwapRefusal(err);
     throw err;
   }
 }
@@ -278,8 +329,25 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+// Loopback is not access control. Any page you visit can make your own browser
+// POST here, and a form with enctype="text/plain" needs no preflight, so a
+// drive-by site could arm the bot or rewrite your real availability. Same-origin
+// requests from the UI send Origin or no Origin at all; a cross-site form sends
+// somebody else's.
+const ALLOWED_ORIGINS = new Set([`http://${HOST}:${PORT}`, `http://localhost:${PORT}`]);
+
+const originAllowed = (req) => {
+  const origin = req.headers.origin;
+  return !origin || ALLOWED_ORIGINS.has(origin);
+};
+
 const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://${HOST}`);
+
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !originAllowed(req)) {
+    console.warn(`rejected ${req.method} ${pathname} from origin ${req.headers.origin}`);
+    return sendJson(res, 403, { error: 'cross-origin requests are not allowed' });
+  }
 
   try {
     if (pathname === '/api/week' && req.method === 'GET') {

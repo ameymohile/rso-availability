@@ -18,6 +18,18 @@
   "_pay": "Remove this block to hide the pay panel. nightFrom/nightTo are start hours, so 0-6 means a shift starting at midnight bills at the night rate. taxRate is your own effective withholding, taken off a real payslip, not a guess.",
   "pay": null,
 
+  "_madmax": "The armed auto-claimer. checkOnly asks the server whether a shift is claimable and logs the answer WITHOUT taking it, which is how to prove the claim path safely; set it false to claim for real. intervalSeconds is floored at 30 because that is the rate the real SwapBoard polls at. stationWeights biases the optimiser: 1.2 makes an hour at that post worth 1.2 of an hour elsewhere, and it maximises total hours when left empty.",
+  "madmax": {
+    "checkOnly": true,
+    "intervalSeconds": 30,
+    "maxHoursPerWeek": 20,
+    "minNoticeMinutes": 180,
+    "minGapMinutes": 480,
+    "skipOverlaps": true,
+    "blackoutDates": [],
+    "stationWeights": {}
+  },
+
   "_maps": "Station names are turned into Google Maps searches. campus is appended to sharpen the search. Put an override in stations only when Google resolves a name badly, e.g. \"INV Northwest 1\": \"42.3406,-71.0890\".",
   "maps": {
     "campus": "",

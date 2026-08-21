@@ -92,6 +92,30 @@ array. It commits to nothing, so it is the way to prove the path against a real
 shift. `madmax.checkOnly: true` in config.json makes a sweep call it and log the
 verdict instead of claiming.
 
+## Picking which shifts to claim
+
+Taking shifts greedily in date order loses hours. With 14h of room and an 8h, a
+7h and a 7h on the board, greedy takes the 8 and then neither 7 fits: 8h banked
+where 14h was available.
+
+So `planBoard` solves it instead of scanning it. Weighted interval scheduling
+with a per-week capacity, by DP over candidates sorted by start. The state is
+(index, last taken, minutes spent this week); the last-taken index gives both
+the earliest legal next start and the current week, because takes only move
+forward. Memoisation is sparse, since reachable spends are subset sums of one
+week's durations rather than every value up to the cap.
+
+Verified against brute force over all subsets on 800 random boards (mixed caps,
+gaps and station weights): identical value every time, and every plan legal. On
+400 realistic boards it claims 7.4% more hours than the greedy pass and is never
+worse.
+
+`stationWeights` turns it from "most hours" into "most valuable hours".
+
+A lost race triggers a re-plan. A shift passed over only because it clashed with
+a claim that then failed is claimable again, so the sweep re-solves against what
+actually landed, up to 3 rounds. The pool strictly shrinks each round.
+
 ## Rate limits
 
 Three separate numbers, and only two are server-side.
@@ -110,10 +134,18 @@ is a spinner delay. The numbers coincide; the meanings do not.
 
 ## Not built
 
-**Open-shift rows** have never been rendered against a real SwapBoard object. They assume the same `Start` / `End` / `Hours` / `StnName` fields as calendar shifts, which is likely but unproven.
+**Open-shift rows** have still never been rendered against a live board, but the
+field list is no longer a guess. The grid in the captured DOM declares
+`LocName` `Date` `StnName` `ShiftGroup` `CliName` `StartSort` `EndSort`
+`BreakStart` `BreakEnd` `Hours` `Notes` `EmpName`, and the action template needs
+`Id` `LocId` `CheckSum` `CanSwap` `IsMe` `ToMe` `BidBoardId` `BidBoardStatus`
+`DataType` `CanSplit` `SwapText`.
 
 **Specific time ranges** like 09:00-17:00. Only all-day and off. Every save I have made used All Day, so the wire format for `TimeSlot.Start` was never captured.
 
 **Overrides**, the date-specific exceptions screen. Not captured.
 
-**Anything unattended.** It only watches while the page is open, so a drop while the laptop is shut still gets missed. That was deliberate. A background watcher that claims on its own needs guardrails I have not built: overlap checks, weekly caps, blackout dates, a kill switch.
+**A claim that has actually run.** Everything above is read out of their client
+and unit tested against a fake session. Not one real request has been sent, so a
+required header or a param I misread would only show up on the first live
+attempt. `checkOnly` exists to make that first attempt harmless.

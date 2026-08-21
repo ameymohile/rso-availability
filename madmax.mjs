@@ -5,7 +5,11 @@
 // recorded with its reason and every claim is logged.
 
 const MINUTE = 60000;
-const WEEK = 604800000;
+
+// The swapboard detail endpoint answers 400 "Please wait [1.5] seconds" if
+// called faster, so sweeping below a second buys no earlier detection and only
+// adds traffic. Raise it if that ever stops being true.
+const MIN_INTERVAL_MS = 1000;
 
 const weekStart = (at) => {
   const d = new Date(at);
@@ -87,6 +91,11 @@ export function judgeBoard(board, { mine = [], config = {}, now = Date.now() } =
 // Arming is deliberately in memory only. Restarting the server disarms, so a
 // bot can never outlive the process that was told to run it.
 export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, intervalMs = 45000 }) {
+  if (intervalMs < MIN_INTERVAL_MS) {
+    console.warn(`madmax: ${intervalMs}ms sweep clamped to ${MIN_INTERVAL_MS}ms`);
+    intervalMs = MIN_INTERVAL_MS;
+  }
+
   let armed = false;
   let timer = null;
   let lastRun = null;

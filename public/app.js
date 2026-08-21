@@ -50,8 +50,10 @@ const el = {
   armBackdrop: document.getElementById('armBackdrop'),
   armRules: document.getElementById('armRules'),
   armWarn: document.getElementById('armWarn'),
-  armInput: document.getElementById('armInput'),
-  armGo: document.getElementById('armGo'),
+  slideArm: document.getElementById('slideArm'),
+  armSlider: document.getElementById('armSlider'),
+  armFill: document.getElementById('armFill'),
+  armLabel: document.getElementById('armLabel'),
   armCancel: document.getElementById('armCancel'),
 };
 
@@ -1203,8 +1205,12 @@ function renderMadMax() {
   el.mmToggle.className = `mm-btn${armed ? ' live' : ''}`;
   el.mmRules.textContent = mmRuleText(rules);
 
+  // Rounding turned a 1.5s sweep into "2s", which misreports the setting.
+  const seconds = (intervalMs ?? 45000) / 1000;
+  const every = Number.isInteger(seconds) ? seconds : seconds.toFixed(1);
+
   el.mmState.textContent = armed
-    ? `ARMED · every ${Math.round((intervalMs ?? 45000) / 1000)}s${lastRun ? ` · swept ${relativeTime(lastRun)}` : ''}`
+    ? `ARMED · every ${every}s${lastRun ? ` · swept ${relativeTime(lastRun)}` : ''}`
     : 'disarmed';
 
   el.mmLog.hidden = !armed || !log.length;
@@ -1259,13 +1265,26 @@ function openArmSheet() {
   el.armWarn.textContent = 'Claiming is not wired up yet: the SwapBoard claim request has never been captured, '
     + 'so every attempt will fail loudly and be logged. Detection and the guardrails are real.';
 
-  el.armInput.value = '';
-  el.armGo.disabled = true;
+  resetSlider();
   el.armBackdrop.hidden = false;
-  el.armInput.focus();
+  el.armSlider.focus();
 }
 
-const closeArmSheet = () => { el.armBackdrop.hidden = true; };
+// Must reach the far end. Anything short snaps back, so a half-hearted drag is
+// the same as not doing it.
+const SLIDE_ARMED_AT = 97;
+
+function resetSlider() {
+  el.armSlider.value = 0;
+  el.armFill.style.width = '0%';
+  el.armLabel.style.opacity = '1';
+  el.slideArm.classList.remove('ready');
+}
+
+const closeArmSheet = () => {
+  el.armBackdrop.hidden = true;
+  resetSlider();
+};
 
 async function setArmed(armed) {
   try {
@@ -1285,11 +1304,17 @@ el.mmToggle.addEventListener('click', () => {
   else openArmSheet();
 });
 
-el.armInput.addEventListener('input', () => {
-  el.armGo.disabled = el.armInput.value.trim().toUpperCase() !== 'ARM';
+el.armSlider.addEventListener('input', () => {
+  const at = Number(el.armSlider.value);
+  el.armFill.style.width = `${at}%`;
+  // The label fades out as the knob covers it rather than sitting underneath.
+  el.armLabel.style.opacity = String(Math.max(0, 1 - at / 45));
+  el.slideArm.classList.toggle('ready', at >= SLIDE_ARMED_AT);
 });
 
-el.armGo.addEventListener('click', () => {
+// Fires on release, so a drag that stops short resets instead of arming.
+el.armSlider.addEventListener('change', () => {
+  if (Number(el.armSlider.value) < SLIDE_ARMED_AT) return resetSlider();
   closeArmSheet();
   setArmed(true);
 });

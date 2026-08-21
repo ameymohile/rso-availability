@@ -188,13 +188,16 @@
       </p>
       <ul class="arm-rules mono" id="armRules"></ul>
       <p class="arm-warn" id="armWarn"></p>
-      <label class="arm-confirm">
-        <span class="mono">type ARM to confirm</span>
-        <input id="armInput" type="text" autocomplete="off" spellcheck="false" placeholder="ARM">
-      </label>
+      <!-- A full swipe, so arming takes a deliberate gesture rather than a click
+           that could land by accident. Keyboard reaches it with End. -->
+      <div class="slide-arm" id="slideArm">
+        <span class="slide-fill" id="armFill"></span>
+        <span class="slide-label mono" id="armLabel">slide to arm</span>
+        <input class="slide-input" id="armSlider" type="range" min="0" max="100" value="0"
+               aria-label="Slide all the way right to arm Mad Max">
+      </div>
       <div class="sheet-actions">
         <button class="sheet-btn" id="armCancel" type="button">Cancel</button>
-        <button class="sheet-btn danger" id="armGo" type="button" disabled>ARM</button>
       </div>
     </div>
   </div>

@@ -1023,7 +1023,10 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 
 /* Deliberately unlike everything else. This one switches on a bot, so it should
    never be mistaken for another settings row. */
-.madmax { border-color: var(--line); }
+.madmax {
+  grid-column: 1 / -1;
+  border-color: var(--line);
+}
 
 .madmax.armed {
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
@@ -1062,11 +1065,17 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 .mm-state { font-size: 11.5px; color: var(--faint); }
 .madmax.armed .mm-state { color: var(--danger); }
 
+/* Takes the slack and truncates first, so the button can never be pushed out of
+   the panel on a narrow window. */
 .mm-rules {
-  margin-left: auto;
+  flex: 1;
+  min-width: 0;
+  text-align: right;
   font-size: 11px;
   color: var(--faint);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mm-btn {

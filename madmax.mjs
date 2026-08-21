@@ -6,10 +6,16 @@
 
 const MINUTE = 60000;
 
-// The swapboard detail endpoint answers 400 "Please wait [1.5] seconds" if
-// called faster, so sweeping below a second buys no earlier detection and only
-// adds traffic. Raise it if that ever stops being true.
-const MIN_INTERVAL_MS = 1000;
+// Two limits exist. The soft one is "Please wait [1.5] seconds". The hard one
+// is "Swap list disabled. (30) minutes idle required for reset.", which revokes
+// board access until nothing has asked for 30 straight minutes. Sweeping at 1s
+// tripped it. A slow sweep that works beats a fast one that gets locked out, so
+// the floor is deliberately generous.
+const MIN_INTERVAL_MS = 15000;
+
+// Retrying while locked out resets the idle timer, so this must stop the sweep
+// rather than back off.
+const LOCKOUT = /disabled|idle required/i;
 
 const weekStart = (at) => {
   const d = new Date(at);
@@ -132,6 +138,15 @@ export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, inte
       }
     } catch (err) {
       record({ kind: 'error', why: err.message });
+
+      // Locked out. Every further request extends the lockout, so stand down
+      // completely instead of retrying.
+      if (LOCKOUT.test(err.message)) {
+        record({ kind: 'disarmed', why: 'swap list locked out, standing down' });
+        armed = false;
+        clearInterval(timer);
+        timer = null;
+      }
     }
   }
 

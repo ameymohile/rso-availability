@@ -159,7 +159,12 @@ function createSession(config) {
 
   async function getJson(path) {
     const res = await request(`${BASE}${path}`, { headers: { accept: 'application/json' } });
-    if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+    if (!res.ok) {
+      // The body carries the reason, e.g. the "Please wait [1.5] seconds"
+      // throttle. Dropping it made rate limits look like generic failures.
+      const detail = (await res.text().catch(() => '')).slice(0, 200).trim();
+      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ''}`);
+    }
     return res.json();
   }
 

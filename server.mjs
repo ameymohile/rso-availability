@@ -84,7 +84,7 @@ async function getShifts({ allowStale = false } = {}) {
 const madmax = createMadMax({
   config: config.madmax ?? {},
   intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
-  loadBoard: () => withSession((s) => loadOpenShifts(s)),
+  loadBoard: () => boardShifts(),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
   claim: (shift) => withSession((s) => claimShift(s, shift)),
   onEvent: (event) => {
@@ -110,6 +110,31 @@ const madmax = createMadMax({
     }
   },
 });
+
+// TeamWork revokes board access with "Swap list disabled. (30) minutes idle
+// required for reset." Because any request restarts that 30 minutes, one shared
+// breaker has to hold every caller off, not just the one that tripped it.
+const SWAP_COOLDOWN_MS = 31 * 60 * 1000;
+let swapBlockedUntil = 0;
+
+async function boardShifts() {
+  if (Date.now() < swapBlockedUntil) {
+    const until = new Date(swapBlockedUntil).toLocaleTimeString();
+    throw new Error(`swap list locked out, resting until ${until}`);
+  }
+
+  try {
+    return await withSession((s) => loadOpenShifts(s));
+  } catch (err) {
+    if (/disabled|idle required/i.test(err.message)) {
+      swapBlockedUntil = Date.now() + SWAP_COOLDOWN_MS;
+      madmax.disarm();
+      notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
+      console.error('swapboard locked out, resting 31 min');
+    }
+    throw err;
+  }
+}
 
 // JSONL because appending a line cannot corrupt the ones before it.
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
@@ -250,7 +275,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
-      const open = await withSession((s) => loadOpenShifts(s));
+      const open = await boardShifts();
       await noteBoardChange(open);
       return sendJson(res, 200, {
         shifts: open.map(withPlace),

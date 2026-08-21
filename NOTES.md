@@ -57,27 +57,58 @@ Watch out: `ShiftCount` counts shifts I hold that day. `SwapCount` is what is ac
 
 `/api/shift/swapboard` rate-limits. Faster than every 1.5s and it returns `400 "Please wait [1.5] seconds to refresh list."`, so detail fetches are spaced 1.6s apart.
 
+## Claiming
+
+Read out of their own client, not off the wire. The page modules are plain ES
+modules served without auth, so they can be read directly:
+
+```
+/js/pages.js                    router: file = "/" + hash.replace("#!","") + ".js"
+/emp/sch-swapboard.js           the SwapBoard view model, vm.QuickClaim
+/emp/Editors/shift-claim.js     the "Check" modal
+```
+
+Three endpoints. Which one you use matters.
+
+```
+GET api/shift/swap/claim/?id=&bid=&checkSum=    asks, commits to nothing
+PUT api/shift/swap/quick-claim?id=&bid=&schid=  takes it, one round trip
+PUT api/shift/swap/claim?id=&bid=&schid=        takes it, needs SchId from the GET
+PUT api/shift/swap/request?id=&bid=&schid=      when ApprovalRequired is set
+```
+
+`bid` is `LocId`, not a bid. `schid` is sent empty by the quick path; the split
+claim flow is what fills it in.
+
+**quick-claim needs no CheckSum.** `vm.QuickClaim` reads `data-cs` into a
+variable and then never uses it. The GET check does need it.
+
+**A 200 is not a success.** Their client treats a null result as claimed and
+anything else as "N/A", so a 200 carrying a message is a refusal. Going by
+status code alone records shifts as taken when they were not.
+
+The GET check returns `CanSwap`, `ApprovalRequired`, `SchId` and a `Checks`
+array. It commits to nothing, so it is the way to prove the path against a real
+shift. `madmax.checkOnly: true` in config.json makes a sweep call it and log the
+verdict instead of claiming.
+
+## Rate limits
+
+Three separate numbers, and only two are server-side.
+
+- **30s.** Their own board refuses to re-read the counts endpoint inside 30
+  seconds (`countData` in sch-swapboard.js). This is the sanctioned poll rate.
+- **1.5s.** `api/shift/swapboard` answers 400 "Please wait [1.5] seconds to
+  refresh list." Detail fetches are spaced 1.6s apart.
+- **30 minutes.** 400 "Swap list disabled. (30) minutes idle required for
+  reset." revokes the board until nothing has asked for 30 straight minutes.
+  Every retry restarts that clock, so the only correct response is silence.
+
+`data-expiry="30"` and `data-delay="1500"` on `#page-swapboard-container` are
+not those limits. `expiry` is a 30 *second* sessionStorage cache TTL and `delay`
+is a spinner delay. The numbers coincide; the meanings do not.
+
 ## Not built
-
-**Claiming a shift.** The write has never been observed and I am not guessing at
-a request that commits me to a shift.
-
-### Capturing it, when a shift finally appears
-
-Mad Max notifies with a Sosumi alert saying `run: npm run capture` the moment it
-finds a shift it cannot take. That notification is the only window.
-
-1. `npm run capture` (opens a recording browser)
-2. Sign in, go to Schedule -> SwapBoard
-3. The AVAILABLE table has an Actions column and `Enable 'Claim Now'` is on.
-   Click **Claim Now** on the row.
-4. Quit the browser with Cmd+Q so the log flushes.
-5. The request is in `recon-out/network.json`. Look for the POST or PUT that
-   fires on the click, then fill in `claimShift()` in tmwork.mjs.
-
-Passwords and tokens are redacted before anything hits disk, so the capture is
-safe to keep. Delete `recon-out/` afterwards anyway, it holds a logged-in
-browser profile.
 
 **Open-shift rows** have never been rendered against a real SwapBoard object. They assume the same `Start` / `End` / `Hours` / `StnName` fields as calendar shifts, which is likely but unproven.
 

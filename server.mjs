@@ -10,7 +10,7 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 import { createMadMax } from './madmax.mjs';
@@ -33,10 +33,6 @@ async function getSession() {
   return session;
 }
 
-// Only an expired session is worth retrying. Retrying anything else doubles the
-// request, and against the swap lockout the retry is actively harmful: the
-// board needs 30 minutes with nothing asking, so the second call restarts the
-// clock the first one started. That put the breaker below a retry that defeated it.
 // Signing in is four sequential requests: /signin, the POST, /emp/, then the
 // token scrape. That is a second or more, and a lazy session meant it landed in
 // front of whichever sweep happened to cross the TTL, delaying both the
@@ -53,6 +49,10 @@ async function rotateSessionIfAgeing() {
   }
 }
 
+// Only an expired session is worth retrying. Retrying anything else doubles the
+// request, and against the swap lockout the retry is actively harmful: the board
+// needs 30 minutes with nothing asking, so the second call restarts the clock
+// the first one started. That put the breaker below a retry that defeated it.
 const looksExpired = (err) => /\b401\b|invalid token|APP\.Token/i.test(err.message);
 
 async function withSession(fn) {
@@ -109,6 +109,7 @@ const madmax = createMadMax({
   loadBoard: () => boardShifts(),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
   claim: (shift) => withSession((s) => claimShift(s, shift)),
+  check: (shift) => withSession((s) => checkClaim(s, shift)),
   afterSweep: rotateSessionIfAgeing,
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
@@ -122,14 +123,14 @@ const madmax = createMadMax({
       notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
     }
 
-    // A shift was on the board and we could not take it. This is the only
-    // moment the claim request can be captured, so it has to interrupt.
+    // A shift was on the board and the claim did not land. Somebody else got
+    // there first, or the server refused it, and the reason is in the event.
     if (event.kind === 'failed') {
-      notify(
-        'Shift on the board, claim not wired',
-        `${event.station ?? 'Shift'} · ${when} — run: npm run capture`,
-        { sound: 'Sosumi' },
-      );
+      notify('Claim failed', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? 'unknown'}`, { sound: 'Sosumi' });
+    }
+
+    if (event.kind === 'checked') {
+      notify('Claim check (nothing taken)', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? ''}`, { sound: 'Ping' });
     }
   },
 });

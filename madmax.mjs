@@ -6,12 +6,18 @@
 
 const MINUTE = 60000;
 
-// Two limits exist. The soft one is "Please wait [1.5] seconds". The hard one
-// is "Swap list disabled. (30) minutes idle required for reset.", which revokes
-// board access until nothing has asked for 30 straight minutes. Sweeping at 1s
-// tripped it. A slow sweep that works beats a fast one that gets locked out, so
-// the floor is deliberately generous.
-const MIN_INTERVAL_MS = 15000;
+// This number is no longer a guess. Their own SwapBoard refuses to re-read the
+// counts endpoint inside 30 seconds:
+//
+//   if (lastCountRefresh != null && secondsSince(lastCountRefresh) < 30) return;
+//       -- countData(), emp/sch-swapboard.js
+//
+// So 30s is the rate the real board polls at, and matching it is the strongest
+// defence against being flagged. Below it are two server limits: "Please wait
+// [1.5] seconds" on the detail endpoint, and "Swap list disabled. (30) minutes
+// idle required for reset.", which revokes board access until nothing has asked
+// for 30 straight minutes. Sweeping at 1s tripped the second one.
+const MIN_INTERVAL_MS = 30000;
 
 // Retrying while locked out resets the idle timer, so this must stop the sweep
 // rather than back off.
@@ -103,7 +109,7 @@ export function judgeBoard(board, { mine = [], config = {}, now = Date.now() } =
 
 // Arming is deliberately in memory only. Restarting the server disarms, so a
 // bot can never outlive the process that was told to run it.
-export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, afterSweep, intervalMs = 45000 }) {
+export function createMadMax({ config, loadBoard, loadMine, claim, check, onEvent, afterSweep, intervalMs = 45000 }) {
   if (intervalMs < MIN_INTERVAL_MS) {
     console.warn(`madmax: ${intervalMs}ms sweep clamped to ${MIN_INTERVAL_MS}ms`);
     intervalMs = MIN_INTERVAL_MS;
@@ -138,11 +144,28 @@ export function createMadMax({ config, loadBoard, loadMine, claim, onEvent, afte
       // margin. The verdicts are all decided before any of them fires, so the
       // weekly cap is still counted across candidates rather than raced.
       const claims = verdicts.filter((v) => v.take).map(async ({ shift }) => {
+        const where = { shift: shift.id, station: shift.station, start: shift.start };
         try {
+          // The claim was written from their client source, never run. checkOnly
+          // asks the server the same question through its read-only endpoint and
+          // logs the answer, so the path can be proven against a real shift
+          // before anything commits Amey to actual work.
+          if (config.checkOnly) {
+            const verdict = await check(shift);
+            record({
+              kind: 'checked', ...where,
+              why: `server says canSwap=${verdict.canSwap}`
+                + `${verdict.approvalRequired ? ', approval required' : ''}`
+                + `${verdict.schId != null ? `, schId=${verdict.schId}` : ''}`
+                + `${verdict.checks?.length ? `, ${verdict.checks.length} checks` : ''}`,
+            });
+            return;
+          }
+
           await claim(shift);
-          record({ kind: 'claimed', shift: shift.id, station: shift.station, start: shift.start, hours: shift.hours });
+          record({ kind: 'claimed', ...where, hours: shift.hours });
         } catch (err) {
-          record({ kind: 'failed', shift: shift.id, station: shift.station, start: shift.start, why: err.message });
+          record({ kind: 'failed', ...where, why: err.message });
         }
       });
 

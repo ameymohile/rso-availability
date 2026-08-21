@@ -444,11 +444,61 @@ export async function loadShifts(session, { weeks = 4 } = {}) {
 // mean firing an unverified write that commits Amey to real work, so it refuses
 // instead. To fill this in: with a shift on the board, run `node recon.mjs`,
 // claim it by hand, quit the browser, and the capture has the request.
+// Read out of their own client rather than off the wire: emp/sch-swapboard.js
+// (vm.QuickClaim) and emp/Editors/shift-claim.js. There are three endpoints and
+// the difference between them matters.
+//
+//   GET api/shift/swap/claim/?id&bid&checkSum    asks, commits to nothing
+//   PUT api/shift/swap/quick-claim?id&bid&schid  takes it, one round trip
+//   PUT api/shift/swap/claim?id&bid&schid        takes it, needs SchId from the GET
+//   PUT api/shift/swap/request?id&bid&schid      when ApprovalRequired is set
+//
+// quick-claim is what the board's "Claim Now" link fires and the only one that
+// takes a shift without a GET in front of it, so it is the one worth racing.
+// Their QuickClaim reads data-cs into a variable and then never uses it, so the
+// CheckSum really is not part of the quick path. schid is sent empty; the split
+// claim flow is what fills it in.
+
+// The server's own verdict, without taking anything. Safe to call on a real
+// shift, which makes it the way to prove this path works before a write.
+export async function checkClaim(session, shift) {
+  const query = new URLSearchParams({
+    id: String(shift.id),
+    bid: String(shift.locId ?? ''),
+    checkSum: String(shift.checkSum ?? ''),
+  });
+
+  const reply = await session.getJson(`/api/shift/swap/claim/?${query}`);
+
+  return {
+    canSwap: Boolean(reply?.CanSwap),
+    // Some shifts need a manager to agree, in which case claiming is a request
+    // and winning the race does not win the shift.
+    approvalRequired: Boolean(reply?.ApprovalRequired),
+    schId: reply?.SchId ?? null,
+    checks: reply?.Checks ?? [],
+    raw: reply,
+  };
+}
+
 export async function claimShift(session, shift) {
-  throw new Error(
-    `claim not implemented: the SwapBoard claim request has never been captured `
-    + `(shift ${shift.id}). Run recon.mjs while claiming one by hand.`,
-  );
+  if (!shift?.id) throw new Error('claim needs a shift id');
+  if (shift.locId == null) {
+    throw new Error(`claim needs LocId, which only the swapboard listing carries (shift ${shift.id})`);
+  }
+
+  const query = `id=${encodeURIComponent(shift.id)}&bid=${encodeURIComponent(shift.locId)}&schid=`;
+  const res = await session.putJson(`/api/shift/swap/quick-claim?${query}`);
+  const body = (await res.text().catch(() => '')).trim();
+
+  // Their client reads a null result as success and anything else as "N/A", so
+  // a 200 carrying a message is a refusal. Going by the status code alone would
+  // record a shift as taken when it was not.
+  if (body && body !== 'null' && body !== '""') {
+    throw new Error(`refused: ${body.slice(0, 200)}`);
+  }
+
+  return { id: shift.id, claimedAt: new Date().toISOString() };
 }
 
 // Remembering the previous per-week counts is what lets a sweep tell a week
@@ -458,8 +508,13 @@ let lastWeekCounts = new Map();
 // swapboardCounts covers ~3 months in one request, so an empty board costs one
 // call. Only weeks with something get a detail fetch, which is rate limited.
 export async function loadOpenShifts(session) {
+  // Their client anchors this on the first of the current month, not today
+  // (getSwapCountUrl in emp/sch-swapboard.js), so match it and get the same
+  // window the real board sees.
+  const today = new Date();
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const counts = await session.getJson(
-    `/api/shift/swapboardCounts?date=${isoDate(new Date())}&fillgaps=true`,
+    `/api/shift/swapboardCounts?date=${isoDate(monthStart)}&fillgaps=true`,
   );
   const active = (counts ?? []).filter((day) => (day.SwapCount ?? 0) > 0 || day.SwapToYou);
 

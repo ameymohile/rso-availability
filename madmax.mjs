@@ -47,13 +47,39 @@ const gapBetween = (a, b) => Math.max(0, a.at >= b.at
   ? new Date(a.start) - new Date(b.end)
   : new Date(b.start) - new Date(a.end));
 
-const hoursIn = (shifts, at) => shifts
+// Hours arrive as decimals, so every cap comparison happens in whole minutes and
+// both sides round identically. Rounding the candidate but not the room made the
+// planner refuse a shift that exactly filled the week while judge() accepted it.
+// The clamp at 0 is what stops a negative hours value buying cap room.
+const toMinutes = (hours) => Math.round(Math.max(0, Number(hours) || 0) * 60);
+const asHours = (minutes) => Number((minutes / 60).toFixed(2));
+
+const minutesIn = (shifts, at) => shifts
   .filter((s) => weekStart(s.at) === weekStart(at))
-  .reduce((sum, s) => sum + (s.hours ?? 0), 0);
+  .reduce((sum, s) => sum + toMinutes(s.hours), 0);
+
+const hoursIn = (shifts, at) => asHours(minutesIn(shifts, at));
+
+// A held shift we cannot read is more dangerous than one we do not have: NaN
+// date arithmetic makes every overlap and gap comparison false and drops its
+// hours out of the week total, so all three guards pass at once. Zero-length
+// rows are the day-off markers the schedule read returns, and keeping them
+// blanks the gap rule either side of midnight while blaming "a shift".
+const readable = (s) => typeof s?.start === 'string' && typeof s?.end === 'string'
+  && Number.isFinite(new Date(s.start).getTime())
+  && Number.isFinite(new Date(s.end).getTime())
+  && Number.isFinite(Number(s.hours)) && Number(s.hours) > 0;
+
+const usableHeld = (shifts, warn = false) => shifts.filter((s) => {
+  if (readable(s)) return true;
+  if (warn) console.warn(`madmax: ignoring an unreadable held shift (${JSON.stringify(s?.start)}..${JSON.stringify(s?.end)}, hours ${JSON.stringify(s?.hours)})`);
+  return false;
+});
 
 // One shift, one verdict, with the reason spelled out. Order matters: the
 // cheapest and most absolute checks run first.
-export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) {
+export function judge(shift, { mine: rawMine = [], config = {}, now = Date.now() } = {}) {
+  const mine = usableHeld(rawMine);
   const {
     maxHoursPerWeek = null,
     minNoticeMinutes = 0,
@@ -67,10 +93,24 @@ export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) 
   // loud beats the alternative: the date arithmetic goes NaN, every comparison
   // against it quietly returns false, and the shift vanishes with no reason
   // given. Found by a fuzz case that generated an hour of 25.
-  if (!Number.isFinite(new Date(shift.start).getTime())
+  //
+  // The typeof checks matter as much as the parse: `new Date(null)` is 0 and
+  // finite, so a null start got past the old guard and then threw on
+  // shift.start.slice(), killing the whole plan instead of rejecting one row.
+  if (typeof shift.start !== 'string' || typeof shift.end !== 'string'
+    || !Number.isFinite(new Date(shift.start).getTime())
     || !Number.isFinite(new Date(shift.end).getTime())) {
-    return { take: false, why: `unparseable times (${shift.start} to ${shift.end})` };
+    return { take: false, why: `unparseable times (${JSON.stringify(shift.start)} to ${JSON.stringify(shift.end)})` };
   }
+
+  if (!Number.isFinite(Number(shift.hours)) || Number(shift.hours) <= 0) {
+    return { take: false, why: `implausible hours (${JSON.stringify(shift.hours)})` };
+  }
+
+  // The claim is addressed by id, so a row without one is unclaimable. Rows with
+  // no id also all collapse to the same key, which used to let several of them
+  // through as one selection.
+  if (shift.id == null) return { take: false, why: 'no shift id' };
 
   // The board reaches about 84 days out; the schedule read that fills `mine`
   // covers less. Past the end of `mine`, hoursIn() returns 0 and every rule that
@@ -108,11 +148,13 @@ export function judge(shift, { mine = [], config = {}, now = Date.now() } = {}) 
     }
   }
 
-  if (maxHoursPerWeek) {
-    const already = hoursIn(mine, shift.at);
-    const after = already + (shift.hours ?? 0);
-    if (after > maxHoursPerWeek) {
-      return { take: false, why: `${after}h would pass the ${maxHoursPerWeek}h cap` };
+  // `!= null`, so a cap of 0 means a cap of zero. It used to be falsy here and
+  // therefore "no cap", while the planner read it as "take nothing" -- setting it
+  // to 0 as a kill switch did the opposite of stopping anything.
+  if (maxHoursPerWeek != null) {
+    const after = minutesIn(mine, shift.at) + toMinutes(shift.hours);
+    if (after > toMinutes(maxHoursPerWeek)) {
+      return { take: false, why: `${asHours(after)}h would pass the ${maxHoursPerWeek}h cap` };
     }
   }
 
@@ -137,9 +179,13 @@ const screen = (shift, ctx) =>
 const fits = (earlier, later, minGapMinutes) =>
   new Date(later.start) - new Date(earlier.end) >= Math.max(0, minGapMinutes) * MINUTE;
 
-// Above this the exact search is abandoned for the greedy pass. The board has
-// never been near it; the guard is here so a freak posting cannot wedge a sweep.
-const EXACT_LIMIT = 120;
+// Above this the exact search is abandoned for the greedy pass. Cost grows about
+// n^4 with minute-granular durations, not the flat curve the old limit of 120
+// assumed: measured 1.6s at n=50, 9.2s at n=80 and 35s at n=120. The search is
+// synchronous and shares the process with the HTTP server, so n=120 stalled
+// everything for longer than the sweep interval. Real boards run under 25ms, so
+// 40 is far above anything seen and well below the cliff.
+const EXACT_LIMIT = 40;
 
 // Picks the best combination of shifts rather than the first that fits.
 //
@@ -155,23 +201,40 @@ const EXACT_LIMIT = 120;
 // only ever move forward, so the week never needs to be carried separately.
 // Memoisation is sparse: the reachable spends are subset sums of one week's
 // durations, not every value up to the cap.
-export function planBoard(board, { mine = [], config = {}, now = Date.now() } = {}) {
+export function planBoard(board, { mine: rawMine = [], config = {}, now = Date.now() } = {}) {
   const { minGapMinutes = 0, maxHoursPerWeek = null } = config;
+  const mine = usableHeld(rawMine, true);
 
-  const screened = board.map((shift) => ({ shift, verdict: screen(shift, { mine, config, now }) }));
+  const screened = board.map((shift) => {
+    // The cap counts the hours field; gap and overlap count real timestamps.
+    // Breaks and DST transitions make those disagree and nothing else notices.
+    if (readable(shift)) {
+      const clock = (new Date(shift.end) - new Date(shift.start)) / MINUTE;
+      if (Math.abs(clock - toMinutes(shift.hours)) > 60) {
+        console.warn(`madmax: shift ${shift.id} says ${shift.hours}h but spans ${asHours(clock)}h`);
+      }
+    }
+    return { shift, verdict: screen(shift, { mine, config, now }) };
+  });
   const rejected = screened.filter((s) => !s.verdict.take);
-  const candidates = screened
-    .filter((s) => s.verdict.take)
-    .map((s) => s.shift)
-    .sort((a, b) => a.at - b.at);
+
+  // One row per id reaches the search. The claim is addressed by id, so two
+  // selected rows sharing one would fire two PUTs at a single shift.
+  const byId = new Map();
+  const duplicates = [];
+  for (const { shift } of screened.filter((s) => s.verdict.take).sort((a, b) => a.shift.at - b.shift.at)) {
+    if (byId.has(shift.id)) duplicates.push(shift);
+    else byId.set(shift.id, shift);
+  }
+  const candidates = [...byId.values()];
 
   // Minutes still available in each week after what is already held.
-  const capMinutes = maxHoursPerWeek == null ? Infinity : maxHoursPerWeek * 60;
+  const capMinutes = maxHoursPerWeek == null ? Infinity : toMinutes(maxHoursPerWeek);
   const roomIn = (at) => (capMinutes === Infinity
     ? Infinity
-    : Math.max(0, capMinutes - hoursIn(mine, at) * 60));
+    : Math.max(0, capMinutes - minutesIn(mine, at)));
 
-  const minutesOf = (shift) => Math.round((shift.hours ?? 0) * 60);
+  const minutesOf = (shift) => toMinutes(shift.hours);
   const n = candidates.length;
 
   let chosen;
@@ -218,16 +281,21 @@ export function planBoard(board, { mine = [], config = {}, now = Date.now() } = 
       const sameWeek = last >= 0 && weekStart(candidates[last].at) === weekStart(candidates[i].at);
       spent = (sameWeek ? spent : 0) + minutesOf(candidates[i]);
       last = i;
-      chosen.add(candidates[i].id);
+      chosen.add(i);
     }
   }
 
-  const takes = candidates.filter((s) => chosen.has(s.id));
+  // By position, not by id. Selecting by id meant every row sharing an id came
+  // back as taken, including rows the search never chose: three rows carrying
+  // the same id turned one 8h pick into three claims and 24h under a 20h cap.
+  // Rows with no id at all collided the same way.
+  const takes = candidates.filter((_, index) => chosen.has(index));
+  const missed = candidates.filter((_, index) => !chosen.has(index));
 
   // A screened-in shift that missed out deserves a reason that says which
   // constraint actually cost it, not a bare "not selected".
   const passedOver = (shift) => {
-    const clash = takes.find((t) => t.id !== shift.id
+    const clash = takes.find((t) => t !== shift
       && !(fits(t, shift, minGapMinutes) || fits(shift, t, minGapMinutes)));
     if (clash) return `clashes with ${clash.station} on ${clash.start.slice(0, 10)}`;
 
@@ -242,7 +310,8 @@ export function planBoard(board, { mine = [], config = {}, now = Date.now() } = 
 
   return [
     ...takes.map((shift) => ({ shift, take: true, why: 'clear' })),
-    ...candidates.filter((s) => !chosen.has(s.id)).map((shift) => ({ shift, take: false, why: passedOver(shift) })),
+    ...missed.map((shift) => ({ shift, take: false, why: passedOver(shift) })),
+    ...duplicates.map((shift) => ({ shift, take: false, why: `duplicate of shift ${shift.id} already on the board` })),
     ...rejected.map(({ shift, verdict }) => ({ shift, ...verdict })),
   ].sort((a, b) => a.shift.at - b.shift.at);
 }
@@ -252,11 +321,14 @@ function greedyPick(candidates, { mine, config, now }) {
   const held = [...mine];
   const chosen = new Set();
 
-  for (const shift of candidates) {
-    if (!judge(shift, { mine: held, config, now }).take) continue;
+  candidates.forEach((shift, index) => {
+    // skipOverlaps is forced on. The exact path forbids overlaps unconditionally
+    // via fits(), and the fallback honoured the flag, so turning it off used to
+    // make a big board claim six simultaneous shifts in one slot.
+    if (!judge(shift, { mine: held, config: { ...config, skipOverlaps: true }, now }).take) return;
     held.push(shift);
-    chosen.add(shift.id);
-  }
+    chosen.add(index);
+  });
 
   return chosen;
 }

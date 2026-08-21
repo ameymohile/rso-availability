@@ -112,6 +112,16 @@ worse.
 
 `stationWeights` turns it from "most hours" into "most valuable hours".
 
+Cap arithmetic is in whole minutes, both sides rounded the same way. Rounding the
+candidate but not the remaining room used to refuse a shift that exactly filled
+the week while `judge` accepted it. A roster schedules to the minute, so for real
+`hours` values this is exact: 3000 fuzzed minute-granular boards produced zero
+cap overage. Sub-minute durations (0.02h) can still slip under by a fraction of a
+minute, which no roster produces.
+
+Selection is by position, never by shift id. Filtering takes by id meant every
+row sharing an id came back as taken, turning one pick into three claims.
+
 A lost race triggers a re-plan. A shift passed over only because it clashed with
 a claim that then failed is claimable again, so the sweep re-solves against what
 actually landed, up to 3 rounds. The pool strictly shrinks each round.

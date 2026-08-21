@@ -142,6 +142,16 @@ export function createMailWatch({ config = {}, password, onTrigger, onEvent }) {
       loop();
     },
 
+    // After the machine sleeps the socket is stale but still looks open, so the
+    // watcher would sit believing it is being pushed to until its own timeout.
+    // Dropping the connection makes the loop rebuild it immediately.
+    reconnect(why = 'forced') {
+      if (!running) return;
+      onEvent?.({ kind: 'mail-error', why: `reconnecting (${why})` });
+      failures = 0;
+      client?.close?.();
+    },
+
     async stop() {
       running = false;
       try {

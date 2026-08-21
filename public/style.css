@@ -1282,3 +1282,7 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 
 /* Pushed to the far end so the counts read as a summary, not another wire. */
 .mm-tallies { margin-left: auto; font-size: 11px; color: var(--faint); }
+
+/* A coverage gap outranks the tallies: it is the difference between "nothing
+   was posted" and "I was not looking". */
+.mm-tallies.warn { color: #d9a13b; }

@@ -17,6 +17,7 @@ import { createMadMax } from './madmax.mjs';
 import { notify } from './notify.mjs';
 import { createMailWatch } from './mailwatch.mjs';
 import { createGate } from './gate.mjs';
+import { createHeartbeat } from './heartbeat.mjs';
 import { keychainPassword } from './tmwork.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
@@ -170,6 +171,28 @@ const mailWatch = createMailWatch({
     // Kept even when it does not trigger. If a shift is posted and no mail
     // arrives, this file is the evidence that email is not the route.
     appendJsonl(MAIL_LOG, { at: new Date().toISOString(), ...event });
+  },
+});
+
+// Closing the lid suspends this process instead of killing it, so launchd sees
+// nothing wrong and never restarts it, and on wake the sweep resumes as if
+// nothing happened. Saying so out loud matters more than it sounds: a panel
+// reading "swept just now" after a night asleep claims coverage that never
+// existed, and the decision to trust the bot depends on knowing the difference.
+let lastGap = null;
+
+const heartbeat = createHeartbeat({
+  onGap: (gapMs) => {
+    const minutes = Math.round(gapMs / 60000);
+    lastGap = { at: new Date().toISOString(), minutes };
+
+    madmax.note({ kind: 'gap', why: `not running for ~${minutes} min (lid closed or asleep). Shifts posted then were missed.` });
+    console.warn(`heartbeat: ${minutes} min gap, process was suspended`);
+
+    // The socket did not survive the suspend even though it may still look open,
+    // so rebuild it now rather than waiting out its timeout with the fast path
+    // quietly dead.
+    mailWatch.reconnect('woke after a gap');
   },
 });
 
@@ -447,7 +470,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/madmax' && req.method === 'GET') {
-      return sendJson(res, 200, { ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status });
+      return sendJson(res, 200, {
+        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap,
+      });
     }
 
     if (pathname === '/api/madmax' && req.method === 'POST') {
@@ -494,6 +519,8 @@ server.listen(PORT, HOST, () => {
   console.log(mail.configured
     ? `mail watch: ${config.mail.user} via ${config.mail.host}`
     : 'mail watch: not configured (see config.example.json "mail")');
+
+  heartbeat.start();
 });
 
 // A watcher holding an IMAP socket would otherwise keep the process alive.

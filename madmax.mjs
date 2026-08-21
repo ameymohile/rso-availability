@@ -521,6 +521,14 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
       return this.state;
     },
 
+    // For things that happened to the bot rather than to a shift, so a gap in
+    // coverage lands in the same log the claims do instead of only in a console
+    // nobody reads.
+    note(entry) {
+      record(entry);
+      return this.state;
+    },
+
     // Something outside the clock says the board changed, so look now rather
     // than waiting out the interval. This is the whole point of the mail watch:
     // a push arrives in well under a second, where a poll is blind for half the

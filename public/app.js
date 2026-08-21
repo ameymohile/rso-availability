@@ -1233,11 +1233,19 @@ function renderWires() {
     : 'idle';
 
   const tally = (kind) => log.filter((e) => e.kind === kind).length;
-  el.mmTallies.textContent = [
+  const counts = [
     `${tally('claimed')} claimed`,
     `${tally('failed')} lost`,
     `${tally('skipped')} skipped`,
   ].join(' · ');
+
+  // A gap outranks the counts. Closing the lid suspends the whole thing, and
+  // "swept just now" after waking would claim coverage that never happened.
+  const gap = mm.lastGap;
+  el.mmTallies.classList.toggle('warn', Boolean(gap));
+  el.mmTallies.textContent = gap
+    ? `asleep ${gap.minutes} min, missed anything posted then · ${counts}`
+    : counts;
 }
 
 function renderMadMax() {

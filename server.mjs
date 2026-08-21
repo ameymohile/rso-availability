@@ -14,6 +14,7 @@ import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShi
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 import { createMadMax } from './madmax.mjs';
+import { notify } from './notify.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -89,6 +90,24 @@ const madmax = createMadMax({
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
     appendJsonl(MADMAX_LOG, event);
+
+    const when = event.start ? new Date(event.start).toLocaleString(undefined, {
+      weekday: 'short', hour: 'numeric', minute: '2-digit',
+    }) : '';
+
+    if (event.kind === 'claimed') {
+      notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
+    }
+
+    // A shift was on the board and we could not take it. This is the only
+    // moment the claim request can be captured, so it has to interrupt.
+    if (event.kind === 'failed') {
+      notify(
+        'Shift on the board, claim not wired',
+        `${event.station ?? 'Shift'} · ${when} — run: npm run capture`,
+        { sound: 'Sosumi' },
+      );
+    }
   },
 });
 

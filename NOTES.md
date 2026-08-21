@@ -59,7 +59,25 @@ Watch out: `ShiftCount` counts shifts I hold that day. `SwapCount` is what is ac
 
 ## Not built
 
-**Claiming a shift.** The write has never been observed and I am not guessing at a request that commits me to a shift. The button opens TeamWork for now. To finish it: when something is actually on the board, run `node recon.mjs`, claim it by hand, quit the browser, and the capture has the request.
+**Claiming a shift.** The write has never been observed and I am not guessing at
+a request that commits me to a shift.
+
+### Capturing it, when a shift finally appears
+
+Mad Max notifies with a Sosumi alert saying `run: npm run capture` the moment it
+finds a shift it cannot take. That notification is the only window.
+
+1. `npm run capture` (opens a recording browser)
+2. Sign in, go to Schedule -> SwapBoard
+3. The AVAILABLE table has an Actions column and `Enable 'Claim Now'` is on.
+   Click **Claim Now** on the row.
+4. Quit the browser with Cmd+Q so the log flushes.
+5. The request is in `recon-out/network.json`. Look for the POST or PUT that
+   fires on the click, then fill in `claimShift()` in tmwork.mjs.
+
+Passwords and tokens are redacted before anything hits disk, so the capture is
+safe to keep. Delete `recon-out/` afterwards anyway, it holds a logged-in
+browser profile.
 
 **Open-shift rows** have never been rendered against a real SwapBoard object. They assume the same `Start` / `End` / `Hours` / `StnName` fields as calendar shifts, which is likely but unproven.
 

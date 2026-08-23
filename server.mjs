@@ -10,13 +10,14 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, loadSwapCounts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 import { createMadMax } from './madmax.mjs';
 import { notify } from './notify.mjs';
 import { createMailWatch } from './mailwatch.mjs';
-import { createGate } from './gate.mjs';
+import { createBudget } from './budget.mjs';
+import { createDetector } from './detect.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
 import { createAwake } from './awake.mjs';
 import { keychainPassword } from './tmwork.mjs';
@@ -135,7 +136,7 @@ const awake = createAwake({
 const madmax = createMadMax({
   config: config.madmax ?? {},
   intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
-  loadBoard: () => boardShifts(),
+  loadBoard: (cause, hint) => boardShifts(cause === 'poll' ? 'routine' : 'urgent', hint?.anchors),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
   claim: async (shift) => {
     const result = await swapWrite((s) => claimShift(s, shift));
@@ -147,7 +148,17 @@ const madmax = createMadMax({
   },
   check: (shift) => swapWrite((s) => checkClaim(s, shift)),
   afterSweep: rotateSessionIfAgeing,
-  onArmChange: (armed) => (armed ? awake.hold() : awake.release()),
+  onArmChange: (armed) => {
+    // The detector costs requests, so it runs only while the bot is armed. It is
+    // also the fast lane, so it starts before the first sweep rather than after.
+    if (armed) {
+      awake.hold();
+      detector.start();
+    } else {
+      awake.release();
+      detector.stop();
+    }
+  },
   onEvent: (event) => {
     console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
     appendJsonl(MADMAX_LOG, event);
@@ -176,7 +187,9 @@ const madmax = createMadMax({
 // rate, so the interval becomes a safety net and this becomes the fast path.
 const mailWatch = createMailWatch({
   config: config.mail ?? {},
-  password: config.mail?.user ? keychainPassword(config.mail.user, { optional: true }) : null,
+  password: config.mail?.user
+    ? keychainPassword(config.mail.user, { optional: true, envVar: 'TMWORK_MAIL_PASSWORD' })
+    : null,
   onTrigger: (reason) => madmax.trigger(reason),
   onEvent: (event) => {
     if (event.kind === 'mail-status') return;
@@ -184,6 +197,59 @@ const mailWatch = createMailWatch({
     // Kept even when it does not trigger. If a shift is posted and no mail
     // arrives, this file is the evidence that email is not the route.
     appendJsonl(MAIL_LOG, { at: new Date().toISOString(), ...event });
+  },
+});
+
+// Detection, moved off the endpoint that bans you. swapboardCounts covers ~84
+// days in one request and answered four calls at every spacing down to 200ms
+// without a refusal (probe.mjs --floor, 2026-08-21), where the board endpoint
+// refuses inside 1.5s. So this carries the frequency and the board endpoint is
+// touched only when a count actually moves.
+//
+// Its own budget, because it is a different endpoint with a different limiter.
+//
+// The rate is set by what has actually been demonstrated, not by the floor. The
+// floor probe found no spacing counts refuses, down to 200ms, and yet 125
+// consecutive calls at 1.01/s were every one of them refused on 2026-08-21. Both
+// are true: four calls in a row cannot find a ceiling counted over minutes. What
+// the probe did demonstrate is 42 requests over ~90s, about 27/min, with no
+// refusal. So the ceiling here is 26/min and the interval sits just under it.
+//
+// `probe.mjs --run --sustain=counts` is what would raise this honestly. It holds
+// a rate for a minute at a time and stops at the first refusal, so the last rate
+// it completes is the real number. Until then, 24/min is the evidence.
+const countsBudget = createBudget({
+  spacingMs: 2000,
+  routinePerMinute: 26,
+  perMinute: 30,
+  per10Minutes: 260,
+  ...(config.madmax?.countsBudget ?? {}),
+  onRest: ({ until, why, ms }) => {
+    madmax.note({ kind: 'rest', why: `counts lane: ${why}, silent until ${new Date(until).toLocaleTimeString()}` });
+    console.warn(`counts lane resting ${Math.round(ms / 60000)} min: ${why}`);
+
+    // A lockout arrives through whichever endpoint happened to ask, and it
+    // applies to the whole swap subsystem. The lane that hears it silences the
+    // other, because a board read during the rest restarts TeamWork's 30 minute
+    // idle clock just as surely as a counts read would.
+    if (ms >= 30 * 60_000) boardBudget.rest(ms, `${why} (heard on the counts lane)`);
+  },
+});
+
+const detector = createDetector({
+  intervalMs: (config.madmax?.detectIntervalSeconds ?? 2.5) * 1000,
+  budget: countsBudget,
+  loadCounts: () => withSession((s) => loadSwapCounts(s)),
+  onPosting: ({ anchors, why, urgent }) => {
+    // The changed day names the month, so the board read that follows is one
+    // aimed request rather than a guess at where to look.
+    madmax.trigger(`counts: ${why}`, { anchors });
+    if (urgent) notify('Shift posted', why, { sound: 'Ping' });
+  },
+  onEvent: (event) => {
+    if (event.kind === 'detector-status') return;
+    console.log(`detect: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
+    appendJsonl(BOARD_LOG, { at: new Date().toISOString(), ...event });
   },
 });
 
@@ -209,16 +275,12 @@ const heartbeat = createHeartbeat({
   },
 });
 
-// TeamWork revokes board access with "Swap list disabled. (30) minutes idle
-// required for reset." Because any request restarts that 30 minutes, one shared
-// breaker has to hold every caller off, not just the one that tripped it.
-const SWAP_COOLDOWN_MS = 31 * 60 * 1000;
 const LOCKOUT_FILE = fileURLToPath(new URL('./.swap-lockout', import.meta.url));
 
 // Held on disk, not just in memory. launchd runs this with KeepAlive, so a crash
 // five minutes into the rest used to come back with a clean breaker and start
 // poking the board again during the one window where silence is the whole point.
-let swapBlockedUntil = (() => {
+const restoredRest = (() => {
   try {
     const until = Number(readFileSync(LOCKOUT_FILE, 'utf8').trim());
     if (Number.isFinite(until) && until > Date.now()) {
@@ -229,58 +291,89 @@ let swapBlockedUntil = (() => {
   return 0;
 })();
 
-const swapLocked = () => Date.now() < swapBlockedUntil;
+// The single owner of how often the swapboard endpoint may be asked anything.
+// See budget.mjs for why this is a budget and not just a spacing gate: the
+// lockout on 2026-08-21 happened because a plain 400 "Please wait [1.5] seconds"
+// was logged as an error and changed nothing about the next request.
+//
+// The defaults are deliberately slower than the 5s sweep that earned that
+// lockout. 2500ms of spacing is well clear of the declared 1500, and the routine
+// ceiling of 8/min leaves 4 for reads that a posting actually triggered, so an
+// empty board can never spend the allowance that the one interesting moment
+// needs. Override in config.json under madmax.budget.
+const boardBudget = createBudget({
+  spacingMs: 2500,
+  routinePerMinute: 8,
+  perMinute: 12,
+  per10Minutes: 60,
+  ...(config.madmax?.budget ?? {}),
+  restoreRestUntil: restoredRest,
+  onRest: ({ until, why, ms }) => {
+    try {
+      writeFileSync(LOCKOUT_FILE, String(until));
+    } catch (writeErr) {
+      console.error('could not persist the rest:', writeErr.message);
+    }
 
-// Any swap endpoint can hand back the lockout, not just the board read, so this
-// is shared. The claim path in particular used to swallow it inside Promise.all
-// and carry on issuing writes at a board that had already cut us off.
-function noteSwapRefusal(err) {
-  if (!/disabled|idle required/i.test(err.message)) return;
+    const minutes = Math.round(ms / 60000);
+    madmax.note({ kind: 'rest', why: `${why}, silent until ${new Date(until).toLocaleTimeString()}` });
+    console.warn(`swapboard resting ${minutes} min: ${why}`);
 
-  swapBlockedUntil = Date.now() + SWAP_COOLDOWN_MS;
-  try {
-    writeFileSync(LOCKOUT_FILE, String(swapBlockedUntil));
-  } catch (writeErr) {
-    console.error('could not persist the lockout:', writeErr.message);
-  }
+    // A short backoff needs no user action, because the budget itself refuses
+    // reads until it expires. A real lockout does: arming again during it would
+    // restart TeamWork's 30 minute idle clock every time it tried.
+    if (ms >= 30 * 60_000) {
+      madmax.disarm();
+      notify('Swap list locked out', `TeamWork cut off the board. Resting ${minutes} min.`, { sound: 'Sosumi' });
+    }
+  },
+});
 
-  madmax.disarm();
-  notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
-  console.error('swapboard locked out, resting 31 min');
+const restingError = () => {
+  const rest = boardBudget.resting;
+  return new Error(rest
+    ? `${rest.why}, ${Math.ceil(rest.waitMs / 1000)}s left`
+    : 'swapboard resting');
+};
+
+// The last board actually read, so a caller the budget turns away can be given
+// something true and dated rather than an error.
+let lastBoard = { shifts: [], at: null };
+
+// `kind` decides which allowance this read spends. A tick of the clock is
+// routine and must leave room behind it; a counts change, a mail trigger or a
+// manual refresh is urgent, because something outside the timer thinks the board
+// just changed and that is the read worth having.
+//
+// `anchors` narrows it. A read the counts lane asked for already knows which
+// months moved, so it costs one aimed request instead of the blind rotation.
+async function boardShifts(kind = 'routine', anchors) {
+  const open = await withSession(
+    (s) => loadOpenShifts(s, { via: (fn) => boardBudget.run(fn, { kind }), anchors }),
+  );
+  lastBoard = { shifts: open, at: new Date().toISOString() };
+  // Every board read feeds the log, not just the ones the UI asks for. This used
+  // to hang off the /api/open-shifts route, so the frequent reads (Mad Max
+  // sweeping) recorded nothing and the log stayed almost empty.
+  await noteBoardChange(open);
+  return open;
 }
 
-const restingError = () =>
-  new Error(`swap list locked out, resting until ${new Date(swapBlockedUntil).toLocaleTimeString()}`);
-
-// 1.6s is the server's declared 1.5s floor with a little rounding up. Every
-// board read from every caller queues through one gate, so the UI poll, the
-// armed sweep and a mail trigger arriving mid-sweep cannot land on top of each
-// other. See gate.mjs for why this is serialised and not merely rate limited.
-const boardGate = createGate({ spacingMs: 1600 });
-
-async function boardShifts() {
-  if (swapLocked()) throw restingError();
-
-  try {
-    const open = await boardGate.run(() => withSession((s) => loadOpenShifts(s)));
-    // Every board read feeds the log, not just the ones the UI asks for. This
-    // used to hang off the /api/open-shifts route, so the frequent reads (Mad
-    // Max sweeping) recorded nothing and the log stayed almost empty.
-    await noteBoardChange(open);
-    return open;
-  } catch (err) {
-    noteSwapRefusal(err);
-    throw err;
-  }
-}
-
-// Claiming and checking are swap endpoints too, so they sit behind the same gate.
+// Claims deliberately do not spend the board's allowance. The refusal we have
+// actually seen is "Please wait [1.5] seconds to refresh *list*", so the limiter
+// looks like it belongs to the read, and a claim held back by our own accounting
+// is the one request that must never be late.
+//
+// They do report refusals, though. A lockout can arrive through the claim path
+// as easily as the read path, and it used to be swallowed inside Promise.all
+// while the sweep carried on writing at a board that had already cut us off.
 async function swapWrite(fn) {
-  if (swapLocked()) throw restingError();
+  if (boardBudget.resting) throw restingError();
+
   try {
     return await withSession(fn);
   } catch (err) {
-    noteSwapRefusal(err);
+    boardBudget.report(err.message);
     throw err;
   }
 }
@@ -465,11 +558,25 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
-      const open = await boardShifts();
-      return sendJson(res, 200, {
-        shifts: open.map(withPlace),
-        checkedAt: new Date().toISOString(),
-      });
+      try {
+        const open = await boardShifts();
+        return sendJson(res, 200, {
+          shifts: open.map(withPlace),
+          checkedAt: new Date().toISOString(),
+          budget: boardBudget.state,
+        });
+      } catch (err) {
+        // Having the page open must not be able to spend the allowance the bot
+        // is holding for a posting, and must not surface as an error either. The
+        // last board we actually read is the honest answer, labelled with when.
+        if (!err.budgetDenied) throw err;
+        return sendJson(res, 200, {
+          shifts: lastBoard.shifts.map(withPlace),
+          checkedAt: lastBoard.at,
+          held: err.message,
+          budget: boardBudget.state,
+        });
+      }
     }
 
     // Availability is wiped weekly, so "what I had last time" is the common want.
@@ -484,7 +591,15 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/madmax' && req.method === 'GET') {
       return sendJson(res, 200, {
-        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap, awake: awake.held,
+        ...madmax.state,
+        rules: config.madmax ?? {},
+        mail: mailWatch.status,
+        lastGap,
+        awake: awake.held,
+        // What is left to spend, so "why has it not swept" has an answer on the
+        // panel instead of only in the log.
+        budget: boardBudget.state,
+        counts: { ...countsBudget.state, detector: detector.status },
       });
     }
 

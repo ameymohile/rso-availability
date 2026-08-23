@@ -3,6 +3,7 @@ config.json
 history.jsonl
 board-log.jsonl
 recon-out/
+probe-out/
 
 node_modules/
 .DS_Store

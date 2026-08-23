@@ -52,6 +52,27 @@ tail -f server.log                                                    # watch
 Mad Max still disarms whenever the server restarts, so KeepAlive cannot bring an
 armed bot back to life. Arming is always a deliberate act.
 
+## Rate limits
+
+TeamWork revokes board access for 30 minutes if you ask too often, and every
+retry restarts those 30 minutes. So one thing owns the question of whether the
+board may be asked at all, and it is deliberately pessimistic: spacing, a ceiling
+per minute and per ten minutes, and silence after any refusal. See `budget.mjs`.
+
+Detection does not use that budget. `swapboardCounts` covers about 84 days in one
+request and is not spacing-limited, so it does the watching and the rate-limited
+board endpoint is read only when a count actually moves, aimed at the month that
+changed. See `detect.mjs`.
+
+The numbers come from `probe.mjs`, which measures the limits instead of guessing
+at them. Run it before changing any of them:
+
+```sh
+node probe.mjs                       # prints the plan, sends nothing
+node probe.mjs --run --floor         # minimum spacing per endpoint
+node probe.mjs --run --sustain=counts  # the rate the counts lane will hold
+```
+
 ## What it does
 
 Toggle days, hit save. Writes straight to TeamWork.

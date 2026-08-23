@@ -2,10 +2,10 @@
 // API notes and how it was worked out: NOTES.md.
 
 import { execFileSync } from 'node:child_process';
+import { send } from './http.mjs';
 
 const BASE = 'https://www.tmwork.net';
 const KEYCHAIN_SERVICE = 'tmwork-rso';
-const SWAPBOARD_THROTTLE_MS = 1600;
 
 // TeamWork numbers days 1..7 from Sunday.
 export const DAY_ORDER = [
@@ -22,8 +22,6 @@ export const SHIFT_BLOCKS = [
   { code: 'C2', from: 1200, to: 1440 },
   { code: 'M', from: 0, to: 480 },
 ];
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -65,7 +63,7 @@ export function mergeRanges(ranges) {
 export const rangesFor = (value) => (Array.isArray(value) ? mergeRanges(value) : []);
 
 // Local YYYY-MM-DD. toISOString() would shift an evening shift to the next day.
-const isoDate = (d) =>
+export const isoDate = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 const startOfWeek = (from) => {
@@ -95,7 +93,7 @@ function createSession(config) {
   let apiToken = null;
 
   function storeCookies(res) {
-    for (const line of res.headers.getSetCookie?.() ?? []) {
+    for (const line of res.setCookie ?? []) {
       const [pair] = line.split(';');
       const idx = pair.indexOf('=');
       if (idx > 0) jar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
@@ -104,23 +102,31 @@ function createSession(config) {
 
   const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 
+  // Every reply carries whether it inherited a warm socket, so "the claim did
+  // not pay for a handshake" stays a measurement rather than a belief.
+  let lastReusedSocket = null;
+
   async function request(url, options = {}, hops = 0) {
     if (hops > 5) throw new Error(`Too many redirects: ${url}`);
 
-    const res = await fetch(url, {
-      ...options,
-      redirect: 'manual',
+    const res = await send(url, {
+      method: options.method ?? 'GET',
+      body: options.body == null ? null : String(options.body),
       headers: {
         cookie: cookieHeader(),
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        // node:https does not decompress for us the way fetch did, and http.mjs
+        // only handles what it can prove it can read.
+        'accept-encoding': 'gzip, identity',
         // /api/ rejects cookies alone with "Invalid Token". Both are required.
         ...(apiToken && url.includes('/api/') ? { 'x-api-token': apiToken } : {}),
         ...options.headers,
       },
     });
     storeCookies(res);
+    lastReusedSocket = res.reusedSocket;
 
-    const location = res.status >= 300 && res.status < 400 && res.headers.get('location');
+    const location = res.status >= 300 && res.status < 400 && res.location;
     // Redirects after a POST are followed as GET, per normal browser rules.
     return location
       ? request(new URL(location, url).href, { headers: options.headers }, hops + 1)
@@ -129,7 +135,7 @@ function createSession(config) {
 
   async function signIn(password) {
     const page = await request(`${BASE}/signin`);
-    const antiforgery = (await page.text())
+    const antiforgery = page.body
       .match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/)?.[1];
     if (!antiforgery) throw new Error('Could not find the antiforgery token on /signin');
 
@@ -145,13 +151,13 @@ function createSession(config) {
         EmpUser: config.employeeUser,
         EmpPassword: password,
         __RequestVerificationToken: antiforgery,
-      }),
+      }).toString(),
     });
 
     // A bad password re-renders the form instead of erroring, so a missing
     // APP.Token is how a silent failure shows up.
     const shell = await request(`${BASE}/emp/`);
-    apiToken = (await shell.text()).match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
+    apiToken = shell.body.match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
     if (!apiToken) {
       throw new Error('Signed in but found no APP.Token in /emp/. The Keychain password is probably wrong.');
     }
@@ -162,10 +168,15 @@ function createSession(config) {
     if (!res.ok) {
       // The body carries the reason, e.g. the "Please wait [1.5] seconds"
       // throttle. Dropping it made rate limits look like generic failures.
-      const detail = (await res.text().catch(() => '')).slice(0, 200).trim();
-      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ''}`);
+      //
+      // Some refusals carry no body at all: swapboardCounts answers 400 with
+      // nothing in it, which is what made 125 refusals in a row at 03:23 on
+      // 2026-08-21 indistinguishable from a bug. The status is now always in the
+      // message so budget.mjs can treat a silent 4xx as the refusal it is.
+      const detail = res.body.slice(0, 200).trim();
+      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ' (empty body)'}`);
     }
-    return res.json();
+    return JSON.parse(res.body);
   }
 
   async function putJson(path, payload) {
@@ -174,17 +185,57 @@ function createSession(config) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${res.body}`);
     return res;
   }
 
-  return { signIn, getJson, putJson };
+  // Everything a probe needs and nothing a caller should rely on: the status
+  // instead of an exception, the body as text, the header set left open so the
+  // browser's exact request can be reproduced, and the wall clock around the
+  // call. getJson throws on a refusal and drops the timing, which is the two
+  // things a rate-limit measurement is made of.
+  async function getRaw(path, { headers = {} } = {}) {
+    const at = Date.now();
+    try {
+      const res = await request(`${BASE}${path}`, { headers });
+      return {
+        status: res.status, ok: res.ok, ms: res.ms, body: res.body, reusedSocket: res.reusedSocket,
+      };
+    } catch (err) {
+      // A transport failure is a data point too, and it must not stop a sweep
+      // through the remaining spacings.
+      return { status: 0, ok: false, ms: Date.now() - at, body: err.message, reusedSocket: false };
+    }
+  }
+
+  return {
+    signIn,
+    getJson,
+    putJson,
+    getRaw,
+    // Whether the last request inherited a live connection. Read by the claim
+    // path so a cold-socket claim is visible in the log instead of just slow.
+    get warm() {
+      return lastReusedSocket;
+    },
+  };
 }
 
 // Exported so a second watcher can keep its own secret in the same Keychain
 // entry style instead of inventing another place to hold a password. `optional`
 // is for the mail watch, which is a feature you can simply not configure.
-export function keychainPassword(account, { optional = false } = {}) {
+// `envVar` is named by the caller rather than assumed, because there are two
+// different secrets here and one variable standing in for both would hand the
+// TeamWork password to the mail server.
+export function keychainPassword(account, { optional = false, envVar } = {}) {
+  // There is no Keychain on a Linux box, and the strongest single thing that can
+  // be done for this bot is to run it in us-east-2 next to their ELB instead of
+  // on a laptop that sleeps. So an env var is allowed to stand in there. On
+  // macOS the Keychain is still where this looks first in practice, because the
+  // variable is not set.
+  const fromEnv = envVar ? process.env[envVar] : null;
+  if (fromEnv) return fromEnv;
+
   try {
     return getPassword(account);
   } catch (err) {
@@ -195,7 +246,7 @@ export function keychainPassword(account, { optional = false } = {}) {
 
 export async function connect(config) {
   const session = createSession(config);
-  await session.signIn(getPassword(config.employeeUser));
+  await session.signIn(keychainPassword(config.employeeUser, { envVar: 'TMWORK_PASSWORD' }));
   return session;
 }
 
@@ -501,7 +552,7 @@ export async function claimShift(session, shift) {
 
   const query = `id=${encodeURIComponent(shift.id)}&bid=${encodeURIComponent(shift.locId)}&schid=`;
   const res = await session.putJson(`/api/shift/swap/quick-claim?${query}`);
-  const body = (await res.text().catch(() => '')).trim();
+  const body = res.body.trim();
 
   // Their client reads a null result as success and anything else as "N/A", so
   // a 200 carrying a message is a refusal. Going by the status code alone would
@@ -510,67 +561,92 @@ export async function claimShift(session, shift) {
     throw new Error(`refused: ${body.slice(0, 200)}`);
   }
 
-  return { id: shift.id, claimedAt: new Date().toISOString() };
+  // `ms` and `warm` are what make a lost race diagnosable. A claim that took
+  // 240ms on a cold socket lost for a reason we can fix; one that took 90ms on a
+  // warm one lost to somebody who was simply there first.
+  return {
+    id: shift.id, claimedAt: new Date().toISOString(), ms: res.ms, warm: res.reusedSocket,
+  };
 }
 
-// Remembering the previous per-week counts is what lets a sweep tell a week
-// that just gained a shift from one that has been sitting there all along.
-let lastWeekCounts = new Map();
-
-// swapboardCounts covers ~3 months in one request, so an empty board costs one
-// call. Only weeks with something get a detail fetch, which is rate limited.
-export async function loadOpenShifts(session) {
-  // Their client anchors this on the first of the current month, not today
-  // (getSwapCountUrl in emp/sch-swapboard.js), so match it and get the same
-  // window the real board sees.
+// The cheap wide view: ~84 days of per-day counts in one request, where a board
+// read covers one month. Used for detection only, because it carries no Id,
+// LocId or CheckSum and so can never claim anything.
+//
+// The date has to be the first of the current month. Their own client computes
+// DATEUTIL.FirstDayOfMonth(new Date()) in getSwapCountUrl (emp/sch-swapboard.js)
+// and anything else is refused. Passing today's date instead is what produced
+// 169 silent 400s on 2026-08-21, took the whole counts-first read down with it,
+// and left the endpoint looking rate limited when it is not.
+//
+// ShiftCount is shifts I hold that day. SwapCount is what is actually claimable.
+// SwapToYou is the day-level "offered to you" flag.
+export async function loadSwapCounts(session) {
   const today = new Date();
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-  const counts = await session.getJson(
+  const rows = await session.getJson(
     `/api/shift/swapboardCounts?date=${isoDate(monthStart)}&fillgaps=true`,
   );
-  const active = (counts ?? []).filter((day) => (day.SwapCount ?? 0) > 0 || day.SwapToYou);
 
-  // range=day returns that day alone, so a board spread over four days used to
-  // cost four throttled calls and 4.8s of sleep before the last one was even
-  // seen. range=week covers all of them, and the board itself defaults to it.
-  // Any date in the week works; anchoring on the Sunday makes weeks dedupe.
-  const weeks = new Map();
-  const offeredOn = new Set();
+  return (rows ?? [])
+    .filter((row) => typeof row?.Date === 'string')
+    .map((row) => ({
+      date: row.Date.slice(0, 10),
+      swaps: row.SwapCount ?? 0,
+      toMe: Boolean(row.SwapToYou),
+    }));
+}
 
-  for (const day of active) {
-    const date = day.Date.slice(0, 10);
-    if (day.SwapToYou) offeredOn.add(date);
+// The board's AVAILABLE grid is rendered from api/shift/swapboard, not from
+// swapboardCounts: dsSwapShifts reads the former and dsSwapCounts only feeds the
+// calendar heat map. Gating the detail read on counts meant a posting that
+// counts had not caught up with was never looked for at all, so the real board
+// could be showing a shift while our sweep saw nothing. Asking the endpoint the
+// board itself asks removes that whole class of miss, and it returns CheckSum
+// and LocId at the same time, so detection and the credentials to claim arrive
+// together instead of costing two round trips.
+//
+// range=month is verified against the live API. The current month is read every
+// sweep because that is where shifts get dropped. The month after is read
+// occasionally: a posting eight weeks out is not a race, and paying a second
+// throttled call every sweep for it would slow down the one that matters.
+const DEEP_EVERY = 20;
+let sweepCount = 0;
 
-    const anchor = isoDate(startOfWeek(`${date}T00:00:00`));
-    const week = weeks.get(anchor) ?? { anchor, count: 0, offered: false };
-    week.count += day.SwapCount ?? 0;
-    week.offered = week.offered || Boolean(day.SwapToYou);
-    weeks.set(anchor, week);
+// `via` spaces each individual request. It used to be a sleep in here, which
+// only spaced the requests *within* one board read: the caller's gate stamped
+// its clock once, before the read started, so on a two-anchor sweep the second
+// request went out ~1.6s after that stamp and the next read's first request
+// followed it by milliseconds. That is the 400 "Please wait [1.5] seconds" in
+// madmax-log at 15:47 on 2026-08-21, self-inflicted, and every refusal restarts
+// the 30-minute lockout clock. Handing every request to the same gate is the
+// only arrangement where the spacing holds across callers as well as within one.
+export async function loadOpenShifts(session, { via = (fn) => fn(), anchors: only } = {}) {
+  const today = new Date();
+  const anchors = only?.length ? [...new Set(only)] : [isoDate(today)];
+
+  // A read the counts lane asked for already knows which months changed, so it
+  // does not need the rotating deep read that exists to cover the horizon
+  // blindly. One request, aimed.
+  if (!only?.length) {
+    sweepCount += 1;
+    if (sweepCount % DEEP_EVERY === 1) {
+      anchors.push(isoDate(new Date(today.getFullYear(), today.getMonth() + 1, 1)));
+    }
   }
-
-  // Fetch the interesting week first. Offered-to-me outranks everything, then
-  // whatever grew since the last sweep, so a new shift never waits behind the
-  // throttle for weeks that have not changed.
-  const rank = (w) => {
-    if (w.offered) return 0;
-    return w.count > (lastWeekCounts.get(w.anchor) ?? 0) ? 1 : 2;
-  };
-  const ordered = [...weeks.values()].sort((a, b) => rank(a) - rank(b));
-  lastWeekCounts = new Map(ordered.map((w) => [w.anchor, w.count]));
 
   const shifts = [];
   const seen = new Set();
 
-  for (const [index, week] of ordered.entries()) {
-    if (index) await sleep(SWAPBOARD_THROTTLE_MS);
-    const items = await session.getJson(`/api/shift/swapboard?date=${week.anchor}&range=week`);
+  for (const anchor of anchors) {
+    const items = await via(() => session.getJson(`/api/shift/swapboard?date=${anchor}&range=month`));
 
     for (const item of items ?? []) {
       if (!item?.Start || seen.has(item.Id)) continue;
       seen.add(item.Id);
-      // SwapToYou belongs to a day, not a week, so it has to be matched back to
-      // the shift's own date rather than the week that was requested.
-      shifts.push({ ...toShift(item), offeredTo: offeredOn.has(item.Start.slice(0, 10)) });
+      // ToMe is the row's own "offered to you" flag, which is more precise than
+      // the day-level SwapToYou that counts reported.
+      shifts.push({ ...toShift(item), offeredTo: Boolean(item.ToMe) });
     }
   }
 

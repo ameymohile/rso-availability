@@ -18,7 +18,7 @@
   "_pay": "Remove this block to hide the pay panel. nightFrom/nightTo are start hours, so 0-6 means a shift starting at midnight bills at the night rate. taxRate is your own effective withholding, taken off a real payslip, not a guess.",
   "pay": null,
 
-  "_madmax": "The armed auto-claimer. checkOnly asks the server whether a shift is claimable and logs the answer WITHOUT taking it, which is how to prove the claim path safely; set it false to claim for real. intervalSeconds is floored at 30 because that is the rate the real SwapBoard polls at. stationWeights biases the optimiser: 1.2 makes an hour at that post worth 1.2 of an hour elsewhere, and it maximises total hours when left empty.",
+  "_madmax": "The armed auto-claimer. checkOnly asks the server whether a shift is claimable and logs the answer WITHOUT taking it, which is how to prove the claim path safely; set it false to claim for real. intervalSeconds is a backstop, not the detector: detection lives on the counts lane below, so this only exists to catch a posting the counts lane missed, and every tick of it spends board allowance that an aimed read would rather have. 60/intervalSeconds must stay under budget.routinePerMinute or the extra ticks are simply held. stationWeights biases the optimiser: 1.2 makes an hour at that post worth 1.2 of an hour elsewhere, and it maximises total hours when left empty.",
   "madmax": {
     "checkOnly": true,
     "intervalSeconds": 30,
@@ -27,7 +27,24 @@
     "minGapMinutes": 480,
     "skipOverlaps": true,
     "blackoutDates": [],
-    "stationWeights": {}
+    "stationWeights": {},
+
+    "_budget": "How much the swapboard endpoint may be asked, ever, by anything. See budget.mjs. routinePerMinute is what clock ticks may spend; the gap up to perMinute is reserved for reads that the counts detector, a mail trigger or a manual refresh asked for, so an empty board cannot spend the allowance the one interesting moment needs. These defaults are slower than the 5s sweep that earned a 30 minute lockout on 2026-08-21. Raise them only against measured numbers from probe.mjs, never on a hunch.",
+    "budget": {
+      "spacingMs": 2500,
+      "routinePerMinute": 8,
+      "perMinute": 12,
+      "per10Minutes": 60
+    },
+
+    "_detect": "The fast lane. swapboardCounts covers ~84 days in one request and is not spacing-limited (measured: 4 calls at every gap down to 200ms, no refusal), so detection lives there and the rate-limited board endpoint is only read once a count actually moves. detectIntervalSeconds is bounded by countsBudget, not by the endpoint: 24/min is what probe.mjs has demonstrated without a refusal, while 60/min was refused outright on 2026-08-21. Run probe.mjs --run --sustain=counts to find the real ceiling before lowering this.",
+    "detectIntervalSeconds": 2.5,
+    "countsBudget": {
+      "spacingMs": 2000,
+      "routinePerMinute": 26,
+      "perMinute": 30,
+      "per10Minutes": 260
+    }
   },
 
   "_mail": "Push instead of polling, and the only thing that can catch a shift that lives for a second. IMAP IDLE wakes the claimer the moment your mail server accepts a TeamWork notification, and it costs zero swapboard requests so it cannot trip the rate limit. Set host/user for wherever the notifications land (imap.gmail.com, or outlook.office365.com for a university account) and store the password the same way as the TeamWork one: security add-generic-password -s tmwork-rso -a YOUR_EMAIL -w. Gmail needs an app password, not your login password. Leave triggerSubject empty until you have seen the real subject line, because empty means every TeamWork mail triggers a look, which is the safe default. Delete this block to run on polling alone.",

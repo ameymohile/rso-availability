@@ -6,18 +6,23 @@
 
 const MINUTE = 60000;
 
-// This number is no longer a guess. Their own SwapBoard refuses to re-read the
-// counts endpoint inside 30 seconds:
+// The only spacing the server actually declares is 1500ms. It arrives in the
+// markup as data-delay="1500" and the refusal interpolates the same value:
+// "Please wait [1.5] seconds to refresh list." 1000ms, just under it, tripped
+// the hard lockout; nothing at or above it ever has.
 //
-//   if (lastCountRefresh != null && secondsSince(lastCountRefresh) < 30) return;
-//       -- countData(), emp/sch-swapboard.js
+// This floor was 30s for a while on the strength of their own board refusing to
+// re-read counts inside 30 seconds (countData, emp/sch-swapboard.js). That was a
+// misreading: it is a UI politeness sized to how often a person would look, not
+// a server limit, and data-expiry="30" being a 30 *second* client cache says the
+// same thing. A shift was then posted and gone inside one 30s window, which is
+// the empirical end of that argument.
 //
-// So 30s is the rate the real board polls at, and matching it is the strongest
-// defence against being flagged. Below it are two server limits: "Please wait
-// [1.5] seconds" on the detail endpoint, and "Swap list disabled. (30) minutes
-// idle required for reset.", which revokes board access until nothing has asked
-// for 30 straight minutes. Sweeping at 1s tripped the second one.
-const MIN_INTERVAL_MS = 30000;
+// What is still not in their client anywhere is the lockout threshold itself:
+// how many refusals over what window escalate to "Swap list disabled. (30)
+// minutes idle required for reset." That is why the breaker has to be right
+// rather than the interval merely being brave.
+const MIN_INTERVAL_MS = 1600;
 
 // Retrying while locked out resets the idle timer, so this must stop the sweep
 // rather than back off. "locked out" is here because the breaker raises its own
@@ -379,7 +384,7 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
     return event;
   };
 
-  async function sweep(cause = 'poll') {
+  async function sweep(cause = 'poll', hint) {
     if (!armed) return;
 
     // setInterval does not wait for an async callback. A sweep can genuinely run
@@ -397,7 +402,11 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
     lastCause = cause;
 
     try {
-      const [board, fresh] = await Promise.all([loadBoard(), loadMine()]);
+      // The cause travels with the read. A tick of the clock is routine and has
+      // to leave allowance behind it; anything else means something outside the
+      // timer believes the board just changed, which is the read worth spending
+      // the reserve on.
+      const [board, fresh] = await Promise.all([loadBoard(cause, hint), loadMine()]);
       if (!board.length) return;
 
       const mine = everythingHeld(fresh);
@@ -481,6 +490,14 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
         if (!take) record({ kind: 'skipped', shift: shift.id, station: shift.station, start: shift.start, why });
       }
     } catch (err) {
+      // The budget refusing a read is the system working, not a fault. It is
+      // logged as its own kind so a held tick cannot be mistaken for an error,
+      // and so a routine tick hitting its ceiling does not read like a lockout.
+      if (err.budgetDenied) {
+        record({ kind: 'held', why: err.message });
+        return;
+      }
+
       record({ kind: 'error', why: err.message });
 
       // Locked out. Every further request extends the lockout, so stand down
@@ -537,10 +554,13 @@ export function createMadMax({ config, loadBoard, loadMine, claim, check, onEven
     // a push arrives in well under a second, where a poll is blind for half the
     // interval. Every guard still applies -- the re-entrancy lock, the breaker,
     // the plan -- so a trigger cannot do anything a sweep could not.
-    trigger(reason = 'external') {
+    // `hint` is whatever the trigger knows that the timer does not, currently
+    // which months a count moved in. It only narrows the read; every guard still
+    // applies, so a trigger can never do something a sweep could not.
+    trigger(reason = 'external', hint) {
       if (!armed) return this.state;
       record({ kind: 'triggered', why: reason });
-      sweep(reason);
+      sweep(reason, hint);
       return this.state;
     },
     disarm() {

@@ -76,15 +76,29 @@ const startOfWeek = (from) => {
   return d;
 };
 
-function getPassword(account) {
+// The Keychain is macOS only, and the strongest single thing that can be done
+// for this claimer is to run it somewhere that does not sleep when a lid closes.
+// So an env var is allowed to stand in. `envVar` is named by the caller rather
+// than assumed, because there are two different secrets in this project and one
+// variable standing in for both would hand the TeamWork password to a mail server.
+function fromEnv(envVar) {
+  const value = envVar ? process.env[envVar] : null;
+  return value && value.length ? value : null;
+}
+
+function getPassword(account, envVar) {
+  const supplied = fromEnv(envVar);
+  if (supplied) return supplied;
+
   try {
     return execFileSync('security', [
       'find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w',
     ], { encoding: 'utf8' }).trim();
   } catch {
     throw new Error(
-      'No Keychain entry found. Store it once with:\n'
-      + `  security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${account} -w`,
+      `No password for ${account}. Either store it in the Keychain:\n`
+      + `  security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${account} -w\n`
+      + `or set ${envVar ?? 'the password env var'}, which is how this runs off a Mac.`,
     );
   }
 }
@@ -203,9 +217,9 @@ function createSession(config) {
 // Exported so a second watcher can keep its own secret in the same Keychain
 // entry style instead of inventing another place to hold a password. `optional`
 // is for the mail watch, which is a feature you can simply not configure.
-export function keychainPassword(account, { optional = false } = {}) {
+export function keychainPassword(account, { optional = false, envVar } = {}) {
   try {
-    return getPassword(account);
+    return getPassword(account, envVar);
   } catch (err) {
     if (optional) return null;
     throw err;
@@ -214,7 +228,7 @@ export function keychainPassword(account, { optional = false } = {}) {
 
 export async function connect(config) {
   const session = createSession(config);
-  await session.signIn(getPassword(config.employeeUser));
+  await session.signIn(getPassword(config.employeeUser, 'TMWORK_PASSWORD'));
   return session;
 }
 

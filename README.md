@@ -82,8 +82,10 @@ Microsoft's own sheet handle the password and MFA. Uncheck everything except Mai
 `install.sh` copies the script to `~/Library/Application Scripts/com.apple.mail/`,
 which is the only place Mail will offer it from.
 
-**3. Leave Mail running.** Rules do not fire when Mail is quit. Add it to Login
-Items. The rule conditions above are duplicated in `alert.mjs` on purpose: a rule
+**3. Leave Mail running, and awake.** Rules do not fire when Mail is quit, and
+Mail receives nothing while the machine is asleep. Add Mail to Login Items.
+Closing the lid sleeps the machine regardless of what is holding it awake, so a
+shut lid means missed shifts: see DEPLOY.md. The rule conditions above are duplicated in `alert.mjs` on purpose: a rule
 is a line in a plist that is easy to loosen by accident, and the mail body decides
 which shift gets claimed.
 

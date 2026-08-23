@@ -75,6 +75,12 @@ function script(shifts, name, from, to) {
 }
 
 export async function syncCalendar(shifts, { name } = {}) {
+  // Calendar.app is driven by AppleScript, so there is nothing to sync when this
+  // runs on a box rather than a Mac. Skipped rather than thrown: the claimer is
+  // the point, and losing it because a calendar could not be written would be
+  // the wrong trade.
+  if (process.platform !== 'darwin') return { synced: 0, skipped: 'not macOS' };
+
   if (process.platform !== 'darwin') throw new Error('Calendar sync is macOS only');
   if (!name) throw new Error('No calendar name configured');
   if (!shifts.length) return { synced: 0, calendar: name };

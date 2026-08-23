@@ -139,6 +139,24 @@
 
       <!-- Spans both columns. Hanging it under the left column made that side
            run far longer than the right and left a dead void at bottom right. -->
+      <!-- The claimer runs whether or not this page is open, so this panel is a
+           switch and a status readout, not a control surface for a session. -->
+      <div class="panel claimer" id="claimer">
+        <div class="panel-head">
+          <h2>Shift claimer</h2>
+          <span class="head-actions">
+            <span class="note mono" id="clState">loading&hellip;</span>
+            <button class="cl-switch" id="clToggle" type="button" role="switch"
+                    aria-checked="false" aria-label="Claim shifts from alert emails">
+              <span class="cl-knob"></span>
+            </button>
+          </span>
+        </div>
+        <p class="note cl-rules mono" id="clRules"></p>
+        <div class="cl-room mono" id="clRoom"></div>
+        <ul class="cl-log" id="clLog"></ul>
+      </div>
+
       <div class="panel" id="history" hidden>
         <div class="panel-head">
           <h2>Recent changes</h2>

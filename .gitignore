@@ -13,3 +13,4 @@ server.log
 mail-log.jsonl
 probe-out/
 claim-log.jsonl
+.claim-paused

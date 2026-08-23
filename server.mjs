@@ -7,7 +7,7 @@
 
 import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, loadBoardForDate, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
@@ -242,10 +242,81 @@ const awake = createAwake({
   },
 });
 
+// Paused state lives on disk, not in memory.
+//
+// The old Mad Max panel deliberately forgot it was armed when the server
+// restarted, because arming a bot was the dangerous direction. Here it is the
+// other way round: config says claim, so forgetting a pause would quietly turn
+// claiming back on the next time launchd restarted this, and "I switched it off"
+// would silently stop being true.
+const PAUSE_FILE = fileURLToPath(new URL('./.claim-paused', import.meta.url));
+
+let paused = (() => {
+  try {
+    readFileSync(PAUSE_FILE, 'utf8');
+    console.warn('claimer: PAUSED, from a previous session');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function setPaused(next) {
+  paused = Boolean(next);
+  try {
+    if (paused) writeFileSync(PAUSE_FILE, new Date().toISOString());
+    else unlinkSync(PAUSE_FILE);
+  } catch (err) {
+    // Say so rather than reporting a state that will not survive a restart.
+    console.error(`could not persist the pause: ${err.message}`);
+  }
+
+  // Nothing to stay awake for while paused, and holding a laptop awake for a
+  // claimer that is switched off is the definition of a tool being rude.
+  if (paused) awake.release();
+  else if (config.claim?.keepAwake !== false) awake.hold();
+
+  appendJsonl(CLAIM_LOG, {
+    at: new Date().toISOString(),
+    kind: paused ? 'paused' : 'resumed',
+    why: paused ? 'switched off from the panel' : 'switched on from the panel',
+  });
+  console.log(`claimer: ${paused ? 'PAUSED' : 'LIVE'}`);
+  return paused;
+}
+
+// Hours already booked per week against the cap, so the panel can say "on, but
+// this week is full" rather than leaving that to be inferred from a skipped
+// alert. Same week boundary and same whole-minute arithmetic as the rule itself.
+function roomByWeek(shifts) {
+  const cap = config.claim?.maxHoursPerWeek;
+  const weeks = new Map();
+
+  for (const shift of shifts ?? []) {
+    const start = new Date(shift.start);
+    if (Number.isNaN(start.getTime())) continue;
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - start.getDay());
+    const key = start.toISOString().slice(0, 10);
+    weeks.set(key, (weeks.get(key) ?? 0) + Math.round((Number(shift.hours) || 0) * 60));
+  }
+
+  return [...weeks]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([week, minutes]) => ({
+      week,
+      booked: Number((minutes / 60).toFixed(2)),
+      room: cap == null ? null : Number((cap - minutes / 60).toFixed(2)),
+    }));
+}
+
 // An alert arrives, one day of the board is read, and the shift it named is
 // claimed. No timer, no polling: if no mail arrives, this does nothing at all.
 const claimer = createClaimer({
   config: config.claim ?? {},
+  // Checked at the moment the mail lands rather than captured at startup, so the
+  // switch takes effect on the next alert and not on the next restart.
+  isPaused: () => paused,
   loadBoard: (date) => boardForDate(date),
   loadMine: async () => (await getShifts({ allowStale: true })).all,
   claim: async (shift) => {
@@ -290,9 +361,12 @@ async function appendJsonl(file, entry) {
   }
 }
 
-async function readHistory(limit = 20) {
+// Newest first. Used for both the availability history and the claim log, which
+// are the same shape: append-only JSONL where a bad line must not lose the good
+// ones around it.
+async function readJsonl(file, limit = 20) {
   try {
-    const text = await readFile(HISTORY, 'utf8');
+    const text = await readFile(file, 'utf8');
     return text
       .split('\n')
       .filter(Boolean)
@@ -304,6 +378,8 @@ async function readHistory(limit = 20) {
     return [];
   }
 }
+
+const readHistory = (limit = 20) => readJsonl(HISTORY, limit);
 
 // Logged only on change, so it answers "when do shifts appear" rather than
 // filling with a line a minute saying nothing happened.
@@ -491,9 +567,36 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/claimer' && req.method === 'GET') {
-      // `awake` and `lastGap` belong next to the rules, because whether this is
-      // actually listening matters more than what it would do if it were.
-      return sendJson(res, 200, { ...claimer.state, awake: awake.held, lastGap });
+      // `awake`, `paused` and `lastGap` belong next to the rules, because whether
+      // this is actually listening matters more than what it would do if it were.
+      const { all } = await getShifts({ allowStale: true });
+      return sendJson(res, 200, {
+        ...claimer.state,
+        paused,
+        awake: awake.held,
+        lastGap,
+        // What the cap leaves, per week. "It is on but it will not take anything"
+        // is otherwise invisible until an alert is skipped.
+        room: roomByWeek(all),
+        // From the file, not the in-memory copy. launchd restarts this, and a
+        // panel that forgets every claim on restart is a panel that cannot be
+        // used to answer "did it take anything last night".
+        log: await readJsonl(CLAIM_LOG, 12),
+      });
+    }
+
+    if (pathname === '/api/claimer' && req.method === 'POST') {
+      const { paused: next } = await readBody(req);
+      setPaused(next);
+      const { all } = await getShifts({ allowStale: true });
+      return sendJson(res, 200, {
+        ...claimer.state,
+        paused,
+        awake: awake.held,
+        lastGap,
+        room: roomByWeek(all),
+        log: await readJsonl(CLAIM_LOG, 12),
+      });
     }
 
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {

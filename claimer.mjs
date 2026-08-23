@@ -196,6 +196,9 @@ export function createClaimer({
   claim,
   check,
   config = {},
+  // Asked at the moment a mail lands, not read once at construction, so the
+  // switch takes effect on the next alert rather than the next restart.
+  isPaused = () => false,
   onEvent,
   now = () => Date.now(),
 } = {}) {
@@ -234,6 +237,15 @@ export function createClaimer({
   // finish before the claim, and there is nothing to parallelise with one shift.
   async function onMail(mail) {
     const { shift: wanted, ignored } = parseAlert(mail);
+
+    // Before the board read and before anything else, because switched off has
+    // to mean no requests at all, not merely no claims. Logged so the alert that
+    // arrived while it was off is still on the record.
+    if (isPaused()) {
+      const label = wanted ? `${wanted.station} ${wanted.start}` : (mail?.subject ?? 'a mail');
+      record({ kind: 'paused', station: wanted?.station ?? null, start: wanted?.start ?? null, why: `switched off, ignored ${label}` });
+      return { claimed: false, why: 'claimer is switched off' };
+    }
 
     if (ignored) {
       // Logged rather than dropped. "A shift was posted and nothing happened" has

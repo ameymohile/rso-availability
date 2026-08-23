@@ -1018,3 +1018,94 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- shift claimer ---------- */
+
+/* This one commits you to real work, so it reads as live state rather than as
+   another settings row: a switch, the rules it would apply, and what it did. */
+.claimer { grid-column: 1 / -1; }
+
+.claimer.live { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+
+.cl-switch {
+  width: 42px;
+  height: 24px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.cl-switch:disabled { opacity: 0.5; cursor: progress; }
+
+.cl-knob {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.cl-switch[aria-checked="true"] {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  border-color: var(--accent);
+}
+
+.cl-switch[aria-checked="true"] .cl-knob {
+  transform: translateX(18px);
+  background: var(--accent);
+}
+
+.cl-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.cl-rules { margin: 0 0 8px; font-size: 11.5px; }
+
+/* A coverage problem outranks everything else on this panel: it is the difference
+   between "nothing was posted" and "I was not listening". */
+#clState.warn { color: #d9a13b; }
+
+.cl-room { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; }
+
+.cl-week {
+  font-size: 11px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.cl-week.full { color: #d9a13b; border-color: color-mix(in srgb, #d9a13b 45%, var(--line)); }
+
+.cl-log {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.cl-line {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  padding: 3px 0;
+  align-items: baseline;
+}
+
+.cl-when { flex: none; opacity: 0.7; }
+.cl-kind { flex: none; min-width: 56px; color: var(--muted); }
+.cl-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.cl-line.claimed .cl-kind { color: var(--accent); }
+.cl-line.gone .cl-kind, .cl-line.error .cl-kind { color: var(--danger); }
+.cl-line.gap .cl-kind { color: #d9a13b; }

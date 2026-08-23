@@ -36,6 +36,12 @@ const el = {
   payRows: document.getElementById('payRows'),
   payNote: document.getElementById('payNote'),
   payToggle: document.getElementById('payToggle'),
+  claimer: document.getElementById('claimer'),
+  clToggle: document.getElementById('clToggle'),
+  clState: document.getElementById('clState'),
+  clRules: document.getElementById('clRules'),
+  clRoom: document.getElementById('clRoom'),
+  clLog: document.getElementById('clLog'),
   syncCal: document.getElementById('syncCal'),
   backdrop: document.getElementById('backdrop'),
   sheetTitle: document.getElementById('sheetTitle'),
@@ -1168,6 +1174,117 @@ el.payToggle.addEventListener('click', () => {
   el.pay.classList.toggle('revealed', payVisible);
   paintPay(payVisible);
 });
+
+
+/* ---------- shift claimer ---------- */
+
+// The claimer is a server-side thing that runs whether or not this page is open,
+// so everything here is a readout of state that lives elsewhere. The one piece of
+// control is the switch, and it posts rather than remembering anything locally.
+let cl = { paused: true, rules: {}, log: [] };
+
+const hoursOfMinutes = (mins) => `${Math.round(mins / 60)}h`;
+
+// Why it would refuse something, in the order it would refuse it. Spelled out
+// because a switch that says ON while a rule quietly blocks everything is worse
+// than no switch.
+const claimRuleText = (rules) => [
+  rules.minNoticeMinutes ? `${hoursOfMinutes(rules.minNoticeMinutes)} notice` : null,
+  rules.maxHoursPerWeek != null ? `${rules.maxHoursPerWeek}h/wk cap` : 'no weekly cap',
+  rules.minGapMinutes ? `${hoursOfMinutes(rules.minGapMinutes)} between shifts` : null,
+  rules.skipOverlaps ? 'no overlaps' : null,
+  rules.blackoutDates?.length ? `${rules.blackoutDates.length} blackout date(s)` : null,
+  rules.checkOnly ? 'CHECK ONLY, takes nothing' : null,
+].filter(Boolean).join(' · ');
+
+function renderClaimer() {
+  const { paused, rules = {}, log = [], room = [], awake, lastGap } = cl;
+  const live = !paused;
+
+  el.claimer.classList.toggle('live', live);
+  el.clToggle.setAttribute('aria-checked', String(live));
+  el.clRules.textContent = claimRuleText(rules);
+
+  // Awake is part of whether it is on. A live claimer on a sleeping laptop hears
+  // nothing, and the panel should not imply otherwise.
+  const warn = live && awake === false;
+  el.clState.classList.toggle('warn', warn || Boolean(lastGap));
+  el.clState.textContent = !live
+    ? 'off'
+    : warn
+      ? 'on · MACHINE CAN SLEEP'
+      : lastGap
+        ? `on · missed ~${lastGap.minutes} min`
+        : 'on · listening';
+
+  // Only weeks that still have room, plus any that are full, because "on but this
+  // week is full" is invisible otherwise until an alert gets skipped.
+  const cap = rules.maxHoursPerWeek;
+  const upcoming = room.filter((w) => w.week >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10));
+  el.clRoom.replaceChildren(...upcoming.slice(0, 4).map((w) => {
+    const span = document.createElement('span');
+    const full = cap != null && w.room <= 0;
+    span.className = `cl-week${full ? ' full' : ''}`;
+    span.textContent = cap == null
+      ? `${w.week.slice(5)} ${w.booked}h`
+      : `${w.week.slice(5)} ${w.booked}/${cap}h`;
+    span.title = full ? 'full, nothing will be claimed this week' : `${w.room}h of room`;
+    return span;
+  }));
+
+  el.clLog.hidden = !log.length;
+  el.clLog.replaceChildren(...log.slice(0, 6).map((event) => {
+    const li = document.createElement('li');
+    li.className = `cl-line ${event.kind}`;
+
+    const when = document.createElement('span');
+    when.className = 'cl-when mono';
+    when.textContent = new Date(event.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+    const kind = document.createElement('span');
+    kind.className = 'cl-kind mono';
+    kind.textContent = event.kind;
+
+    const what = document.createElement('span');
+    what.className = 'cl-what';
+    what.textContent = [event.station, event.why].filter(Boolean).join(' — ');
+
+    li.append(when, kind, what);
+    return li;
+  }));
+}
+
+async function loadClaimer() {
+  try {
+    cl = await api('/api/claimer');
+    renderClaimer();
+  } catch (err) {
+    el.clState.textContent = 'unavailable';
+    console.warn('claimer state unavailable:', err.message);
+  }
+}
+
+el.clToggle.addEventListener('click', async () => {
+  // Optimistic would be wrong here: this commits real work, so the switch only
+  // moves once the server says it moved.
+  el.clToggle.disabled = true;
+  try {
+    cl = await api('/api/claimer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: !cl.paused }),
+    });
+    renderClaimer();
+  } catch (err) {
+    console.warn('claimer toggle failed:', err.message);
+  } finally {
+    el.clToggle.disabled = false;
+  }
+});
+
+loadClaimer();
+// Claims happen without this page, so the panel has to go looking for them.
+setInterval(loadClaimer, 20000);
 
 /* ---------- appearance ---------- */
 

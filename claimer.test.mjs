@@ -36,7 +36,8 @@ function createClaimerAt(when, options = {}) {
   return harness({ ...options, now: when });
 }
 
-function harness({ board = [ROW], mine = [], config = {}, claimResult, now = NOW } = {}) {
+function harness(options = {}) {
+  const { board = [ROW], mine = [], config = {}, claimResult, now = NOW } = options;
   const claims = [];
   const checks = [];
   const events = [];
@@ -44,6 +45,7 @@ function harness({ board = [ROW], mine = [], config = {}, claimResult, now = NOW
 
   const claimer = createClaimer({
     config: { minNoticeMinutes: 60, ...config },
+    isPaused: () => Boolean(options.paused),
     now: () => now,
     loadBoard: async (date) => { boardReads.push(date); return board; },
     loadMine: async () => mine,
@@ -71,6 +73,42 @@ test('an alert becomes exactly one board read and one claim', async () => {
   assert.equal(h.claims[0].id, ROW.id);
   assert.deepEqual(kinds(h.events), ['alert', 'claimed']);
   assert.match(h.events.at(-1).why, /ms from the alert/);
+});
+
+test('switched off, an alert costs nothing and is still recorded', async () => {
+  // Off has to mean no requests at all, not merely no claims, and the alert that
+  // arrived while it was off still belongs on the record.
+  const h = harness({ paused: true });
+  const result = await h.claimer.onMail(ALERT);
+
+  assert.equal(result.claimed, false);
+  assert.match(result.why, /switched off/);
+  assert.deepEqual(h.boardReads, [], 'the board must not be touched');
+  assert.equal(h.claims.length, 0);
+  assert.deepEqual(kinds(h.events), ['paused']);
+});
+
+test('the switch is read per alert, not captured at startup', async () => {
+  // A toggle that only takes effect on the next restart is a toggle that lies.
+  let off = true;
+  const events = [];
+  const boardReads = [];
+  const claimer = createClaimer({
+    config: { minNoticeMinutes: 60 },
+    now: () => NOW,
+    isPaused: () => off,
+    loadBoard: async (date) => { boardReads.push(date); return [ROW]; },
+    loadMine: async () => [],
+    claim: async (row) => ({ id: row.id }),
+    onEvent: (e) => events.push(e),
+  });
+
+  await claimer.onMail(ALERT);
+  assert.deepEqual(boardReads, []);
+
+  off = false;
+  const result = await claimer.onMail(ALERT);
+  assert.equal(result.claimed, true, 'the very next alert obeys the new setting');
 });
 
 test('a mail that is not a shift alert costs no requests', async () => {

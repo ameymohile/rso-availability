@@ -24,16 +24,44 @@ const HOST = '127.0.0.1';
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const config = JSON.parse(readFileSync(new URL('./config.json', import.meta.url)));
 
-// Sign-in costs seconds, so hold it briefly. Short enough that a server-side
-// expiry means one slow request, not a wedged UI.
-const SESSION_TTL_MS = 5 * 60 * 1000;
+// Sign-in is four sequential requests: /signin, the POST, /emp/, then the token
+// scrape. Measured against the live site: **855ms**. The board read that follows
+// it is 65ms on a warm socket. So the sign-in was seven times the cost of the
+// work, and it sat squarely on the claim path.
+//
+// It used to be worse than it looks. The session was expired proactively after
+// five minutes, and alerts arrive far less often than that, so essentially every
+// claim paid the 855ms. The fix is not a longer timeout, it is to stop putting
+// sign-in on the critical path at all:
+//
+//   - No proactive expiry. The session is used until the server rejects it, and
+//     `looksExpired` already retries that case.
+//   - A keeper pings a cheap endpoint on a timer. That renews the session server
+//     side, holds the TCP and TLS connection open so the next request skips both
+//     handshakes, and discovers a dead session on its own time rather than on the
+//     one request that matters.
+const SESSION_PING_MS = 45 * 1000;
+// Their load balancer closes an idle connection at about 60s, so the ping has to
+// be inside that or the socket is cold again regardless of the session.
+const PING_PATH = '/api/employee/preferences';
+
 let cached = null;
+let signingIn = null;
+let lastPing = null;
 
 async function getSession() {
-  if (cached && Date.now() - cached.at < SESSION_TTL_MS) return cached.session;
-  const session = await connect(config);
-  cached = { session, at: Date.now() };
-  return session;
+  if (cached) return cached.session;
+
+  // Collapse concurrent cold starts. Two alerts arriving together would each
+  // start their own four-request sign-in otherwise.
+  signingIn ??= connect(config)
+    .then((session) => {
+      cached = { session, at: Date.now() };
+      return session;
+    })
+    .finally(() => { signingIn = null; });
+
+  return signingIn;
 }
 
 // Only an expired session is worth retrying. Retrying anything else doubles the
@@ -49,6 +77,26 @@ async function withSession(fn) {
     if (!looksExpired(err)) throw err;
     cached = null;
     return fn(await getSession());
+  }
+}
+
+// Keeps the session and the connection warm so a claim pays for neither.
+//
+// One request every 45s to an endpoint with no rate limit on it, which is the
+// price of not paying 855ms plus two TLS handshakes on the request that decides
+// whether a shift is yours. `claim.keepWarm: false` turns it off.
+async function pingSession() {
+  const at = Date.now();
+  try {
+    const session = await getSession();
+    await session.getJson(PING_PATH);
+    lastPing = { at: new Date(at).toISOString(), ms: Date.now() - at, warm: session.warm, ok: true };
+  } catch (err) {
+    // Drop it and let the next ping sign in again. Doing that here, on a timer,
+    // is the entire point: the alternative is discovering it mid-claim.
+    if (looksExpired(err)) cached = null;
+    lastPing = { at: new Date(at).toISOString(), ms: Date.now() - at, ok: false, why: err.message };
+    console.warn(`session ping failed: ${err.message}`);
   }
 }
 
@@ -173,11 +221,16 @@ const restingError = () =>
 // other. See gate.mjs for why this is serialised and not merely rate limited.
 const boardGate = createGate({ spacingMs: 1600 });
 
+// The last board actually read, so a caller that has to be turned away can be
+// given something true and dated rather than nothing.
+let lastBoard = { shifts: [], at: null };
+
 async function boardShifts() {
   if (swapLocked()) throw restingError();
 
   try {
     const open = await boardGate.run(() => withSession((s) => loadOpenShifts(s)));
+    lastBoard = { shifts: open, at: new Date().toISOString() };
     // Every board read feeds the log, not just the ones the UI asks for. This
     // used to hang off the /api/open-shifts route, so the frequent reads
     // recorded nothing and the log stayed almost empty.
@@ -540,6 +593,19 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
+      // Both this and a claim read `api/shift/swapboard`, and that endpoint
+      // refuses anything inside 1.5s, so they queue behind one gate. A page poll
+      // landing first would make the claim wait out the spacing. Nothing on this
+      // page is worth 1.6s of a claim, so while an alert is in flight the page
+      // gets the last board instead of a place in the queue.
+      if (claimer.state.handling > 0) {
+        return sendJson(res, 200, {
+          shifts: lastBoard.shifts.map(withPlace),
+          checkedAt: lastBoard.at,
+          held: 'a claim is in flight',
+        });
+      }
+
       const open = await boardShifts();
       return sendJson(res, 200, {
         shifts: open.map(withPlace),
@@ -578,6 +644,10 @@ const server = createServer(async (req, res) => {
         // What the cap leaves, per week. "It is on but it will not take anything"
         // is otherwise invisible until an alert is skipped.
         room: roomByWeek(all),
+        // Whether the fast path is actually hot. A live claimer with a cold
+        // session pays 855ms before it reads anything, and that should be
+        // visible rather than inferred from a slow claim.
+        warm: { session: Boolean(cached), lastPing },
         // From the file, not the in-memory copy. launchd restarts this, and a
         // panel that forgets every claim on restart is a panel that cannot be
         // used to answer "did it take anything last night".
@@ -634,6 +704,12 @@ server.listen(PORT, HOST, () => {
   // Live means live: nothing to arm, because the trigger is an email rather than
   // a timer, so the only question is whether this process is awake to receive it.
   if (config.claim?.keepAwake !== false) awake.hold();
+
+  if (config.claim?.keepWarm !== false) {
+    pingSession();
+    // Unref'd: keeping a session warm is not a reason to hold the process open.
+    setInterval(pingSession, SESSION_PING_MS).unref?.();
+  }
 
   const rules = config.claim ?? {};
   console.log(rules.checkOnly

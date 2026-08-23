@@ -1198,7 +1198,7 @@ const claimRuleText = (rules) => [
 ].filter(Boolean).join(' · ');
 
 function renderClaimer() {
-  const { paused, rules = {}, log = [], room = [], awake, lastGap } = cl;
+  const { paused, rules = {}, log = [], room = [], awake, lastGap, warm } = cl;
   const live = !paused;
 
   el.claimer.classList.toggle('live', live);
@@ -1207,15 +1207,20 @@ function renderClaimer() {
 
   // Awake is part of whether it is on. A live claimer on a sleeping laptop hears
   // nothing, and the panel should not imply otherwise.
-  const warn = live && awake === false;
+  // A cold session costs 855ms of sign-in on the one request that matters, so it
+  // is worth saying out loud rather than leaving to be inferred from a slow claim.
+  const cold = live && warm && warm.session === false;
+  const warn = live && (awake === false || cold);
   el.clState.classList.toggle('warn', warn || Boolean(lastGap));
   el.clState.textContent = !live
     ? 'off'
-    : warn
+    : awake === false
       ? 'on · MACHINE CAN SLEEP'
-      : lastGap
-        ? `on · missed ~${lastGap.minutes} min`
-        : 'on · listening';
+      : cold
+        ? 'on · COLD, first claim pays sign-in'
+        : lastGap
+          ? `on · missed ~${lastGap.minutes} min`
+          : `on · listening${warm?.lastPing?.warm ? ' · warm' : ''}`;
 
   // Only weeks that still have room, plus any that are full, because "on but this
   // week is full" is invisible otherwise until an alert gets skipped.

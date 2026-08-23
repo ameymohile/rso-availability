@@ -182,6 +182,45 @@ Details that cost a rewrite if forgotten:
   `minNoticeMinutes: 180` would have thrown away exactly the shift this feature
   exists to catch. The default is 60 now.
 
+### What a claim costs, and where it went
+
+Measured against the live site on 2026-08-23:
+
+```
+sign-in (4 sequential requests)     855ms
+board read, cold socket             154ms   (209ms after 6s idle)
+board read, warm socket              65ms
+claim write, warm socket            ~55ms
+```
+
+Sign-in dominated everything, and it was on the critical path of every claim.
+The session was expired proactively after five minutes and alerts arrive far
+less often than that, so essentially every alert paid the 855ms before it even
+looked at the board.
+
+Three changes, all measured rather than assumed:
+
+- **No proactive session expiry.** Use it until the server rejects it; the
+  `looksExpired` retry already covers that case.
+- **A keeper pings `api/employee/preferences` every 45s.** That renews the
+  session server side and holds the connection open. Their load balancer closes
+  an idle socket at about 60s, so 45s is inside it with margin. Verified: a ping
+  after a full cycle reports `warm: true` and costs 78ms against 943ms cold.
+- **`http.mjs` instead of `fetch`.** undici drops an idle socket after ~3s and
+  does not expose the dispatcher, so every request was paying TCP and TLS again.
+
+End to end, alert in to verdict out, measured over five runs on the live server:
+**99, 100, 113, 122, 151ms**. Before: 855 + ~200 = over a second.
+
+The page poll also stands down while a claim is in flight. Both read
+`api/shift/swapboard`, which refuses anything inside 1.5s, so they queue behind
+one gate and a page poll landing first would make the claim wait out the spacing.
+
+None of this changes who wins a contested race, because the 12s of mail delay
+below dwarfs all of it. What it changes is the shift that is still sitting there:
+a claim now lands about a second sooner, and the failure mode where a cold
+session made it nearly two seconds is gone.
+
 ### How late the mail is
 
 Measured 2026-08-23 over all 56 alerts sitting in Apple Mail, comparing each

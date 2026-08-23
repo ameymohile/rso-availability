@@ -25,6 +25,7 @@
   "claim": {
     "checkOnly": true,
     "keepAwake": true,
+    "keepWarm": true,
     "minNoticeMinutes": 180,
     "maxHoursPerWeek": 20,
     "minGapMinutes": 0,

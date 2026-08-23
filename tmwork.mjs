@@ -2,6 +2,7 @@
 // API notes and how it was worked out: NOTES.md.
 
 import { execFileSync } from 'node:child_process';
+import { send } from './http.mjs';
 
 const BASE = 'https://www.tmwork.net';
 const KEYCHAIN_SERVICE = 'tmwork-rso';
@@ -95,7 +96,7 @@ function createSession(config) {
   let apiToken = null;
 
   function storeCookies(res) {
-    for (const line of res.headers.getSetCookie?.() ?? []) {
+    for (const line of res.setCookie ?? []) {
       const [pair] = line.split(';');
       const idx = pair.indexOf('=');
       if (idx > 0) jar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
@@ -104,23 +105,32 @@ function createSession(config) {
 
   const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 
+  // Whether the last reply came back on a socket that was already open. Measured
+  // rather than assumed, because "the claim went out on a warm connection" is
+  // exactly the kind of claim that is easy to believe and wrong.
+  let lastReusedSocket = null;
+
   async function request(url, options = {}, hops = 0) {
     if (hops > 5) throw new Error(`Too many redirects: ${url}`);
 
-    const res = await fetch(url, {
-      ...options,
-      redirect: 'manual',
+    const res = await send(url, {
+      method: options.method ?? 'GET',
+      body: options.body == null ? null : String(options.body),
       headers: {
         cookie: cookieHeader(),
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        // node:https does not decompress for us the way fetch did, and http.mjs
+        // only handles the encodings it can prove it can read.
+        'accept-encoding': 'gzip, identity',
         // /api/ rejects cookies alone with "Invalid Token". Both are required.
         ...(apiToken && url.includes('/api/') ? { 'x-api-token': apiToken } : {}),
         ...options.headers,
       },
     });
     storeCookies(res);
+    lastReusedSocket = res.reusedSocket;
 
-    const location = res.status >= 300 && res.status < 400 && res.headers.get('location');
+    const location = res.status >= 300 && res.status < 400 && res.location;
     // Redirects after a POST are followed as GET, per normal browser rules.
     return location
       ? request(new URL(location, url).href, { headers: options.headers }, hops + 1)
@@ -129,7 +139,7 @@ function createSession(config) {
 
   async function signIn(password) {
     const page = await request(`${BASE}/signin`);
-    const antiforgery = (await page.text())
+    const antiforgery = page.body
       .match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/)?.[1];
     if (!antiforgery) throw new Error('Could not find the antiforgery token on /signin');
 
@@ -145,13 +155,13 @@ function createSession(config) {
         EmpUser: config.employeeUser,
         EmpPassword: password,
         __RequestVerificationToken: antiforgery,
-      }),
+      }).toString(),
     });
 
     // A bad password re-renders the form instead of erroring, so a missing
     // APP.Token is how a silent failure shows up.
     const shell = await request(`${BASE}/emp/`);
-    apiToken = (await shell.text()).match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
+    apiToken = shell.body.match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
     if (!apiToken) {
       throw new Error('Signed in but found no APP.Token in /emp/. The Keychain password is probably wrong.');
     }
@@ -162,10 +172,10 @@ function createSession(config) {
     if (!res.ok) {
       // The body carries the reason, e.g. the "Please wait [1.5] seconds"
       // throttle. Dropping it made rate limits look like generic failures.
-      const detail = (await res.text().catch(() => '')).slice(0, 200).trim();
-      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ''}`);
+      const detail = res.body.slice(0, 200).trim();
+      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ' (empty body)'}`);
     }
-    return res.json();
+    return JSON.parse(res.body);
   }
 
   async function putJson(path, payload) {
@@ -174,11 +184,20 @@ function createSession(config) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${res.body}`);
     return res;
   }
 
-  return { signIn, getJson, putJson };
+  return {
+    signIn,
+    getJson,
+    putJson,
+    // Read by the claim path so a cold-socket claim shows up in the log as slow
+    // for a reason, rather than just slow.
+    get warm() {
+      return lastReusedSocket;
+    },
+  };
 }
 
 // Exported so a second watcher can keep its own secret in the same Keychain
@@ -501,7 +520,7 @@ export async function claimShift(session, shift) {
 
   const query = `id=${encodeURIComponent(shift.id)}&bid=${encodeURIComponent(shift.locId)}&schid=`;
   const res = await session.putJson(`/api/shift/swap/quick-claim?${query}`);
-  const body = (await res.text().catch(() => '')).trim();
+  const body = res.body.trim();
 
   // Their client reads a null result as success and anything else as "N/A", so
   // a 200 carrying a message is a refusal. Going by the status code alone would
@@ -510,7 +529,9 @@ export async function claimShift(session, shift) {
     throw new Error(`refused: ${body.slice(0, 200)}`);
   }
 
-  return { id: shift.id, claimedAt: new Date().toISOString() };
+  return {
+    id: shift.id, claimedAt: new Date().toISOString(), ms: res.ms, warm: res.reusedSocket,
+  };
 }
 
 // Remembering the previous per-week counts is what lets a sweep tell a week

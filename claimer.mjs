@@ -283,8 +283,8 @@ export function createClaimer({
 
       const { row, why: matchWhy } = matchShift(board, wanted);
       if (!row) {
-        // Almost always means somebody else claimed it between the mail being
-        // sent and us reading the board. That is a lost race, not a fault.
+        // Somebody claimed it in the ~12s the mail took to arrive. A lost race,
+        // and nothing on this side reaches it.
         record({ kind: 'gone', station: wanted.station, start: wanted.start, why: matchWhy });
         return { claimed: false, why: matchWhy };
       }

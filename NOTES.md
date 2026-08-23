@@ -182,11 +182,39 @@ Details that cost a rewrite if forgotten:
   `minNoticeMinutes: 180` would have thrown away exactly the shift this feature
   exists to catch. The default is 60 now.
 
-Still unmeasured: **how long the mail takes to arrive.** That is the number that
-decides whether this wins races, and it is the one thing outside our control. The
-`Received:` chain on a real alert gives the transit half of it. TeamWork's own
-queue delay before it sends is invisible from here, so the honest test is whether
-a claim lands.
+### How late the mail is
+
+Measured 2026-08-23 over all 56 alerts sitting in Apple Mail, comparing each
+message's own `Date` header against when it was delivered:
+
+```
+min 3s   median 12s   mean 13.2s   p90 19s   p95 26s   max 38s
+```
+
+The header chain says where it goes:
+
+```
+Date:                             13 Aug 2026 09:11:56 -0600   schedulesource sends
+X-MS-Exchange-...-OriginalArrivalTime: 13 Aug 2026 15:12:05    Microsoft receives   +9s
+X-MS-Exchange-Transport-EndToEndLatency: 00:00:03.16           delivered            +3s
+Received: from mail pickup service by aws-us2.schedulesource.com with Microsoft SMTPSVC
+```
+
+So most of it is schedulesource's own relay, not Microsoft's. That last line is an
+IIS pickup directory: TeamWork writes a file and a service collects it later. None
+of that is reachable from here, so **12s is a floor on this design, not something
+to optimise.** On top of it sits whatever delay there is between the shift being
+released and the mail being generated, which is invisible from outside.
+
+What that means, plainly: a bot polling `api/shift/swapboard` at its 1.5s floor
+sees a posting in about 0.75s on average. This route sees it in 12. It takes every
+shift nobody else is actively racing, and loses every shift somebody is. That is
+the honest ceiling, and no amount of work on our side moves it.
+
+The parser is proven against all 56, not the one that was transcribed: 56/56, and
+the real bodies cover `20:00-00:00` (the midnight rollover), `08:45-13:00` and
+`12:45-17:15` (off-hour times with minutes), and station names carrying a `(2)`
+suffix that matches the board's `StnName` exactly.
 
 ## Not built
 

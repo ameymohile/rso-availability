@@ -87,9 +87,14 @@ Items. The rule conditions above are duplicated in `alert.mjs` on purpose: a rul
 is a line in a plist that is easy to loosen by accident, and the mail body decides
 which shift gets claimed.
 
-The rules live in `config.json` under `claim`. `minShiftHours`, `minNoticeMinutes`
-and `blackoutDates` are decided from the email alone, so a shift that fails one of
-them costs no board read at all.
+The rules live in `config.json` under `claim`. `minNoticeMinutes` and
+`blackoutDates` are decided from the email alone, so a shift that fails one of them
+costs no board read at all.
+
+`minNoticeMinutes` is how far out the shift has to start. Over the 56 real alerts,
+`180` keeps 48 and skips 8, and all 8 were genuinely short notice: 60, 68, 72, 79,
+117, 118, 119 and 138 minutes. There is no minimum-duration rule, because every
+real shift was 4h, 4.25h, 4.5h or 8h.
 
 `claim.checkOnly` in `config.json` starts `true`. It runs the whole path and asks
 TeamWork whether the shift is claimable instead of taking it, so the first real

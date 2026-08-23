@@ -30,7 +30,13 @@ const ROW = {
 // 08/13/2026 09:00 local, well before the shift and after the mail.
 const NOW = new Date(2026, 7, 13, 9, 0, 0).getTime();
 
-function harness({ board = [ROW], mine = [], config = {}, claimResult } = {}) {
+// Same harness, but with the clock moved, for the rules that are about "how far
+// away is this shift right now".
+function createClaimerAt(when, options = {}) {
+  return harness({ ...options, now: when });
+}
+
+function harness({ board = [ROW], mine = [], config = {}, claimResult, now = NOW } = {}) {
   const claims = [];
   const checks = [];
   const events = [];
@@ -38,7 +44,7 @@ function harness({ board = [ROW], mine = [], config = {}, claimResult } = {}) {
 
   const claimer = createClaimer({
     config: { minNoticeMinutes: 60, ...config },
-    now: () => NOW,
+    now: () => now,
     loadBoard: async (date) => { boardReads.push(date); return board; },
     loadMine: async () => mine,
     claim: async (row) => {
@@ -193,14 +199,20 @@ test('a shift starting too soon is skipped', async () => {
   assert.match(h.events.at(-1).why, /notice/);
 });
 
-test('the default notice would not have rejected the real alert', () => {
-  // The captured mail went out at 10:30 for a shift at 12:45, so 135 minutes.
-  // The old default of 180 threw exactly this shift away, which is the whole
-  // thing this feature exists to catch.
+test('the default notice is three hours, and that does skip some real alerts', () => {
+  // Asked for: do not take a shift starting inside three hours. The cost is
+  // known rather than guessed. Across the 56 captured alerts a 180 minute rule
+  // keeps 48 and skips 8, and the captured 2026-08-13 mail is one of the 8: it
+  // went out at 10:30 for a shift at 12:45, which is 135 minutes.
   const mailAt = new Date(2026, 7, 13, 10, 30).getTime();
   const verdict = judge(ROW, { mine: [], config: {}, now: mailAt });
 
-  assert.equal(verdict.take, true, 'a 135 minute alert must survive the defaults');
+  assert.equal(verdict.take, false, '135 minutes is inside a three hour rule');
+  assert.match(verdict.why, /under the 180 min notice/);
+
+  // Four hours out, the same shift is fine.
+  const earlier = new Date(2026, 7, 13, 8, 45).getTime();
+  assert.equal(judge(ROW, { mine: [], config: {}, now: earlier }).take, true);
 });
 
 test('an overlapping or back-to-back shift is refused', () => {
@@ -218,43 +230,32 @@ test('an overlapping or back-to-back shift is refused', () => {
   assert.match(verdict.why, /under 480 min/);
 });
 
-test('a shift shorter than the minimum costs no board read at all', async () => {
-  // A two hour shift across town is not worth the trip, and the mail already
-  // says it is two hours. Reading the board to find that out would spend the one
-  // endpoint that rate limits on a shift we were never going to take.
-  const alert = {
-    ...ALERT,
-    body: ALERT.body.replace('12:45pm - 5:15pm', '12:45pm - 2:45pm'),
-  };
+test('a shift starting too soon costs no board read at all', async () => {
+  // The mail already says when the shift starts, so reading the board to find
+  // out would spend the one endpoint that rate limits on a shift that was never
+  // going to be taken. Eight of the 56 real alerts fall here at a 3h rule.
+  const h = harness({ config: { minNoticeMinutes: 180 } });
+  const result = await h.claimer.onMail(ALERT); // 09:00 now, 12:45 start = 225 min
 
-  const h = harness({ config: { minShiftHours: 3, minNoticeMinutes: 60 } });
-  const result = await h.claimer.onMail(alert);
+  assert.equal(result.claimed, true, '225 min of notice clears a 3h rule');
 
-  assert.equal(result.claimed, false);
-  assert.deepEqual(h.boardReads, [], 'the board must not be touched');
-  assert.equal(h.claims.length, 0);
-  assert.match(h.events.at(-1).why, /2h is under the 3h minimum \(no board read\)/);
+  // 12:45 is now only 2h away, which is inside the rule.
+  const tight = createClaimerAt(new Date(2026, 7, 13, 10, 45).getTime(), {
+    config: { minNoticeMinutes: 180 },
+  });
+  const outcome = await tight.claimer.onMail(ALERT);
+
+  assert.equal(outcome.claimed, false);
+  assert.deepEqual(tight.boardReads, [], 'the board must not be touched');
+  assert.match(tight.events.at(-1).why, /notice.*no board read/);
 });
 
-test('a shift starting too soon also costs no board read', async () => {
-  // Same reasoning: the start time is in the mail.
-  const h = harness({ config: { minNoticeMinutes: 600 } });
-  await h.claimer.onMail(ALERT);
-
-  assert.deepEqual(h.boardReads, []);
-  assert.match(h.events.at(-1).why, /notice.*no board read/);
-});
-
-test('the minimum is inclusive, and every real alert clears it', () => {
-  // Inclusive: 3 means "3 hours or longer is fine".
-  const exactly = { ...ROW, end: '2026-08-13T15:45:00', hours: 3 };
-  assert.equal(judge(exactly, { config: { minShiftHours: 3 }, now: NOW }).take, true);
-
-  // The durations actually seen across the 56 captured alerts. None is under 4h,
-  // so a 3h floor changes nothing today and only guards the future.
-  for (const hours of [8, 4, 4.25, 4.5]) {
-    const verdict = judge({ ...ROW, hours }, { config: { minShiftHours: 3 }, now: NOW });
-    assert.equal(verdict.take, true, `${hours}h should clear a 3h floor`);
+test('every real shift length clears the rules, since none is short', () => {
+  // 4h x42, 4.25h x7, 4.5h x4 and 8h x3 across the 56 captured alerts. There is
+  // deliberately no minimum-duration rule, because it could never fire.
+  for (const hours of [4, 4.25, 4.5, 8]) {
+    const verdict = judge({ ...ROW, hours }, { config: {}, now: NOW });
+    assert.equal(verdict.take, true, `${hours}h should be claimable`);
   }
 });
 

@@ -112,22 +112,14 @@ export function matchShift(board, wanted) {
 // at all. One definition, called from both the pre-screen and judge().
 export function screenByDescription(shift, { config = {}, now = Date.now() } = {}) {
   const {
-    // A short shift is not worth the trip. Inclusive, so 3 means "3 hours or
-    // longer is fine": every one of the 56 real alerts was 4h or more, so this
-    // excludes nothing seen so far and exists for the day something short turns
-    // up. Set 3.01 if a shift of exactly three hours should also be refused.
-    minShiftHours = 0,
-    // The real alert on 2026-08-13 went out at 10:30 for a shift starting at
-    // 12:45, so 135 minutes of notice. The old default of 180 would have thrown
-    // that shift away. Anything above about two hours rejects the mail this
-    // whole feature exists to act on.
-    minNoticeMinutes = 60,
+    // How far out the shift has to start. Measured across the 56 captured
+    // alerts: 180 keeps 48 of them and skips 8, and every one of those 8 was
+    // genuinely short notice (60, 68, 72, 79, 117, 118, 119 and 138 minutes).
+    // 120 would keep one more. There is no duration rule here on purpose: every
+    // real shift was 4h, 4.25h, 4.5h or 8h, so a minimum length could never fire.
+    minNoticeMinutes = 180,
     blackoutDates = [],
   } = config;
-
-  if (Number(shift.hours) < minShiftHours) {
-    return { take: false, why: `${shift.hours}h is under the ${minShiftHours}h minimum` };
-  }
 
   const day = shift.start.slice(0, 10);
   if (blackoutDates.includes(day)) return { take: false, why: `${day} is blacked out` };

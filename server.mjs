@@ -10,12 +10,13 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, loadBoardForDate, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
 import { notify } from './notify.mjs';
 import { createGate } from './gate.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
+import { createClaimer } from './claimer.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -168,10 +169,34 @@ async function boardShifts() {
   try {
     const open = await boardGate.run(() => withSession((s) => loadOpenShifts(s)));
     // Every board read feeds the log, not just the ones the UI asks for. This
-    // used to hang off the /api/open-shifts route, so the frequent reads (Mad
-    // Max sweeping) recorded nothing and the log stayed almost empty.
+    // used to hang off the /api/open-shifts route, so the frequent reads
+    // recorded nothing and the log stayed almost empty.
     await noteBoardChange(open);
     return open;
+  } catch (err) {
+    noteSwapRefusal(err);
+    throw err;
+  }
+}
+
+// The claimer's read. Same gate and same breaker as the page's, because it is the
+// same rate-limited endpoint, but one day rather than the horizon.
+async function boardForDate(date) {
+  if (swapLocked()) throw restingError();
+
+  try {
+    return await boardGate.run(() => withSession((s) => loadBoardForDate(s, date)));
+  } catch (err) {
+    noteSwapRefusal(err);
+    throw err;
+  }
+}
+
+async function swapWrite(fn) {
+  if (swapLocked()) throw restingError();
+
+  try {
+    return await withSession(fn);
   } catch (err) {
     noteSwapRefusal(err);
     throw err;
@@ -181,6 +206,46 @@ async function boardShifts() {
 // JSONL because appending a line cannot corrupt the ones before it.
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const HISTORY = logPath('history.jsonl');
+const CLAIM_LOG = logPath('claim-log.jsonl');
+
+// An alert arrives, one day of the board is read, and the shift it named is
+// claimed. No timer, no polling: if no mail arrives, this does nothing at all.
+const claimer = createClaimer({
+  config: config.claim ?? {},
+  loadBoard: (date) => boardForDate(date),
+  loadMine: async () => (await getShifts({ allowStale: true })).all,
+  claim: async (shift) => {
+    const result = await swapWrite((s) => claimShift(s, shift));
+    // What I hold just changed, so the five minute cache is wrong now. Leaving
+    // it stale let the next alert plan against a schedule missing the shift just
+    // taken, and claim straight through the weekly cap.
+    shiftCache = null;
+    return result;
+  },
+  check: (shift) => swapWrite((s) => checkClaim(s, shift)),
+  onEvent: (event) => {
+    console.log(`claim: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
+    appendJsonl(CLAIM_LOG, event);
+
+    const when = event.start
+      ? new Date(event.start).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+      : '';
+
+    if (event.kind === 'claimed') {
+      notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
+    }
+
+    // Losing a race is the expected outcome sometimes, but it should never be
+    // silent: it is the only signal that the email is arriving too late to win.
+    if (event.kind === 'gone') {
+      notify('Lost the race', `${event.station ?? 'Shift'} · ${when} was already taken`, { sound: 'Sosumi' });
+    }
+
+    if (event.kind === 'error') {
+      notify('Claim failed', `${event.station ?? 'Shift'} · ${when}: ${event.why}`, { sound: 'Sosumi' });
+    }
+  },
+});
 
 // Logs are a nicety. Never fail real work because one could not be written.
 async function appendJsonl(file, entry) {
@@ -269,7 +334,16 @@ function sendJson(res, status, payload) {
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString() || '{}');
+  const raw = Buffer.concat(chunks).toString();
+
+  // Form encoding as well as JSON, because the Mail rule posts with curl's
+  // --data-urlencode. That hands off an email body containing quotes, newlines
+  // and whatever else without an AppleScript-side JSON escaper to get wrong.
+  if (/application\/x-www-form-urlencoded/i.test(req.headers['content-type'] ?? '')) {
+    return Object.fromEntries(new URLSearchParams(raw));
+  }
+
+  return JSON.parse(raw || '{}');
 }
 
 async function serveStatic(req, res, pathname) {
@@ -371,6 +445,19 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/history' && req.method === 'GET') {
       return sendJson(res, 200, { history: await readHistory() });
+    }
+
+    // What the Mail rule posts. Deliberately dumb: it takes the message as it
+    // arrived and every decision about whether it means anything lives in
+    // alert.mjs, which is unit tested against a real one.
+    if (pathname === '/api/alert' && req.method === 'POST') {
+      const mail = await readBody(req);
+      const result = await claimer.onMail(mail);
+      return sendJson(res, 200, result);
+    }
+
+    if (pathname === '/api/claimer' && req.method === 'GET') {
+      return sendJson(res, 200, { ...claimer.state, lastGap });
     }
 
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {

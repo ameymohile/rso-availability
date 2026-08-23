@@ -11,6 +11,9 @@ Reverse engineered from a recorded browser session. Here so future me can fix it
 | `server.mjs` | Local server + JSON API. |
 | `public/` | The UI. Vanilla HTML/CSS/JS, no build step. |
 | `recon.mjs` | Traffic recorder, for when the site changes. |
+| `alert.mjs` | Parses the TeamWork alert email. Tested against a real one. |
+| `claimer.mjs` | Alert in, one board read, one claim out. |
+| `mail-alert.applescript` | The Apple Mail rule that fires the moment an alert lands. |
 
 ## Auth
 
@@ -141,6 +144,49 @@ Three separate numbers, and only two are server-side.
 `data-expiry="30"` and `data-delay="1500"` on `#page-swapboard-container` are
 not those limits. `expiry` is a 30 *second* sessionStorage cache TTL and `delay`
 is a spinner delay. The numbers coincide; the meanings do not.
+
+## The alert email
+
+`mailer@schedulesource.com`, subject `TeamWork ALERT: SHIFT AVAILABLE`. Captured
+2026-08-13:
+
+```
+SHIFT AVAILABLE:
+
+[RSO Boston][Hamper Station Duty]
+Thursday, 08/13/2026  12:45pm - 5:15pm
+
+BY: Mehta, Aryan
+
+--- TEAMWORK ---
+https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Ftmwork.net%2F&...
+```
+
+What it does not carry matters more than what it does. **No shift id, no LocId,
+and the only link is the site root**, so the mail cannot be claimed from
+directly. It does pin the shift exactly, so one `swapboard?date=&range=day` turns
+the description into the `Id` and `LocId` that `quick-claim` needs. One request
+per alert, aimed at one day. Nothing polls.
+
+Details that cost a rewrite if forgotten:
+
+- The date line is `MM/DD/YYYY` with **two spaces** before the time, and the times
+  come from the same formatter as everything else, so `8pm` and `12:45pm` both
+  turn up. Outlook sends HTML to some clients with those spaces as `&nbsp;`.
+- `8pm - 12am` means the end is the **next day**. Read as-is it is a
+  negative-length shift and every guardrail downstream compares against nonsense.
+- Outlook rewrites every link through SafeLinks, so if TeamWork ever does put an
+  id in a link it arrives percent-encoded inside `url=`. `unwrapSafeLink` is there
+  for that day, and that day removes the board read entirely.
+- That mail gave **135 minutes of notice** (sent 10:30, shift at 12:45). The old
+  `minNoticeMinutes: 180` would have thrown away exactly the shift this feature
+  exists to catch. The default is 60 now.
+
+Still unmeasured: **how long the mail takes to arrive.** That is the number that
+decides whether this wins races, and it is the one thing outside our control. The
+`Received:` chain on a real alert gives the transit half of it. TeamWork's own
+queue delay before it sends is invisible from here, so the honest test is whether
+a claim lands.
 
 ## Not built
 

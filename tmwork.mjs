@@ -519,6 +519,29 @@ let lastWeekCounts = new Map();
 
 // swapboardCounts covers ~3 months in one request, so an empty board costs one
 // call. Only weeks with something get a detail fetch, which is rate limited.
+// One day of the board, for the one date an alert mail named.
+//
+// This is the whole rate-limited surface the email claimer touches: one request
+// per alert, `range=day` because the mail says which day, and no polling. The
+// counts-first sweep below exists for the page, which wants the whole horizon;
+// asking it for a single known date would spend two requests to answer a
+// question the mail already answered.
+//
+// Past dates are allowed through. An alert can arrive for a shift starting in
+// two hours, and refusing to look because the date is "today" would drop it.
+export async function loadBoardForDate(session, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '')) {
+    throw new Error(`board read needs a YYYY-MM-DD date, got ${JSON.stringify(date)}`);
+  }
+
+  const items = await session.getJson(`/api/shift/swapboard?date=${date}&range=day`);
+
+  return (items ?? [])
+    .filter((item) => item?.Start)
+    .map((item) => ({ ...toShift(item), offeredTo: Boolean(item.ToMe) }))
+    .sort((a, b) => a.at - b.at);
+}
+
 export async function loadOpenShifts(session) {
   // Their client anchors this on the first of the current month, not today
   // (getSwapCountUrl in emp/sch-swapboard.js), so match it and get the same

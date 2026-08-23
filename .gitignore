@@ -12,3 +12,4 @@ server.log
 .swap-lockout
 mail-log.jsonl
 probe-out/
+claim-log.jsonl

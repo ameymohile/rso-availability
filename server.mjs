@@ -329,13 +329,17 @@ function setPaused(next) {
   if (paused) awake.release();
   else if (config.claim?.keepAwake !== false) awake.hold();
 
-  appendJsonl(CLAIM_LOG, {
+  console.log(`claimer: ${paused ? 'PAUSED' : 'LIVE'}`);
+
+  // Awaited, not fired and forgotten. The route replies with the log it reads
+  // back from this file, so an unawaited append meant the panel could render the
+  // toggle without the line recording that very toggle, which reads as the switch
+  // not having worked.
+  return appendJsonl(CLAIM_LOG, {
     at: new Date().toISOString(),
     kind: paused ? 'paused' : 'resumed',
     why: paused ? 'switched off from the panel' : 'switched on from the panel',
-  });
-  console.log(`claimer: ${paused ? 'PAUSED' : 'LIVE'}`);
-  return paused;
+  }).then(() => paused);
 }
 
 // Hours already booked per week against the cap, so the panel can say "on, but
@@ -644,6 +648,10 @@ const server = createServer(async (req, res) => {
         // What the cap leaves, per week. "It is on but it will not take anything"
         // is otherwise invisible until an alert is skipped.
         room: roomByWeek(all),
+        // The hours are read from a five minute cache. A claim made *here*
+        // invalidates it, but a shift claimed by hand in TeamWork cannot, so the
+        // figures can lag and the panel should say so rather than look wrong.
+        roomAt: shiftCache?.at ? new Date(shiftCache.at).toISOString() : null,
         // Whether the fast path is actually hot. A live claimer with a cold
         // session pays 855ms before it reads anything, and that should be
         // visible rather than inferred from a slow claim.
@@ -657,7 +665,7 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/claimer' && req.method === 'POST') {
       const { paused: next } = await readBody(req);
-      setPaused(next);
+      await setPaused(next);
       const { all } = await getShifts({ allowStale: true });
       return sendJson(res, 200, {
         ...claimer.state,

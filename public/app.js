@@ -1198,7 +1198,7 @@ const claimRuleText = (rules) => [
 ].filter(Boolean).join(' · ');
 
 function renderClaimer() {
-  const { paused, rules = {}, log = [], room = [], awake, lastGap, warm } = cl;
+  const { paused, rules = {}, log = [], room = [], awake, lastGap, warm, roomAt } = cl;
   const live = !paused;
 
   el.claimer.classList.toggle('live', live);
@@ -1226,6 +1226,18 @@ function renderClaimer() {
   // week is full" is invisible otherwise until an alert gets skipped.
   const cap = rules.maxHoursPerWeek;
   const upcoming = room.filter((w) => w.week >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10));
+  // Shifts claimed by hand in TeamWork cannot invalidate our cache, so these
+  // numbers can be up to five minutes behind. Saying when they are from beats
+  // looking stale for no stated reason.
+  const ageMs = roomAt ? Date.now() - new Date(roomAt).getTime() : 0;
+  const stale = ageMs > 90_000
+    ? Object.assign(document.createElement('span'), {
+      className: 'cl-week stale',
+      textContent: `as of ${Math.round(ageMs / 60000)}m ago`,
+      title: 'hours are read from a 5 minute cache; a shift claimed by hand in TeamWork lands here late',
+    })
+    : null;
+
   el.clRoom.replaceChildren(...upcoming.slice(0, 4).map((w) => {
     const span = document.createElement('span');
     const full = cap != null && w.room <= 0;
@@ -1235,7 +1247,7 @@ function renderClaimer() {
       : `${w.week.slice(5)} ${w.booked}/${cap}h`;
     span.title = full ? 'full, nothing will be claimed this week' : `${w.room}h of room`;
     return span;
-  }));
+  }), ...(stale ? [stale] : []));
 
   el.clLog.hidden = !log.length;
   el.clLog.replaceChildren(...log.slice(0, 6).map((event) => {

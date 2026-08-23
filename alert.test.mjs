@@ -93,11 +93,13 @@ test('trailing whitespace does not defeat the line anchors', () => {
 });
 
 test('a different TeamWork alert does not become a claim', () => {
-  // The gate is the whole subject, not the word ALERT. Firing a claim at a
-  // schedule-published notice would send a claim for a shift nobody offered.
+  // The gate is the whole subject, not the word ALERT. "SHIFT CHANGE(S)" is real:
+  // one arrived on 2026-08-23 and reached the endpoint, and this check is what
+  // stopped it becoming a claim for a shift nobody offered. The rest are shapes
+  // worth refusing whether or not TeamWork sends them.
   for (const subject of [
+    'TeamWork ALERT: SHIFT CHANGE(S)',
     'TeamWork ALERT: SCHEDULE PUBLISHED',
-    'TeamWork ALERT: SHIFT TAKEN',
     'TeamWork ALERT',
     'FW: TeamWork ALERT: SHIFT AVAILABLE — see below',
   ]) {

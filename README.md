@@ -87,6 +87,10 @@ Items. The rule conditions above are duplicated in `alert.mjs` on purpose: a rul
 is a line in a plist that is easy to loosen by accident, and the mail body decides
 which shift gets claimed.
 
+The rules live in `config.json` under `claim`. `minShiftHours`, `minNoticeMinutes`
+and `blackoutDates` are decided from the email alone, so a shift that fails one of
+them costs no board read at all.
+
 `claim.checkOnly` in `config.json` starts `true`. It runs the whole path and asks
 TeamWork whether the shift is claimable instead of taking it, so the first real
 alert proves the plumbing without committing you to a shift. Set it to `false`

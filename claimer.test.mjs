@@ -218,6 +218,46 @@ test('an overlapping or back-to-back shift is refused', () => {
   assert.match(verdict.why, /under 480 min/);
 });
 
+test('a shift shorter than the minimum costs no board read at all', async () => {
+  // A two hour shift across town is not worth the trip, and the mail already
+  // says it is two hours. Reading the board to find that out would spend the one
+  // endpoint that rate limits on a shift we were never going to take.
+  const alert = {
+    ...ALERT,
+    body: ALERT.body.replace('12:45pm - 5:15pm', '12:45pm - 2:45pm'),
+  };
+
+  const h = harness({ config: { minShiftHours: 3, minNoticeMinutes: 60 } });
+  const result = await h.claimer.onMail(alert);
+
+  assert.equal(result.claimed, false);
+  assert.deepEqual(h.boardReads, [], 'the board must not be touched');
+  assert.equal(h.claims.length, 0);
+  assert.match(h.events.at(-1).why, /2h is under the 3h minimum \(no board read\)/);
+});
+
+test('a shift starting too soon also costs no board read', async () => {
+  // Same reasoning: the start time is in the mail.
+  const h = harness({ config: { minNoticeMinutes: 600 } });
+  await h.claimer.onMail(ALERT);
+
+  assert.deepEqual(h.boardReads, []);
+  assert.match(h.events.at(-1).why, /notice.*no board read/);
+});
+
+test('the minimum is inclusive, and every real alert clears it', () => {
+  // Inclusive: 3 means "3 hours or longer is fine".
+  const exactly = { ...ROW, end: '2026-08-13T15:45:00', hours: 3 };
+  assert.equal(judge(exactly, { config: { minShiftHours: 3 }, now: NOW }).take, true);
+
+  // The durations actually seen across the 56 captured alerts. None is under 4h,
+  // so a 3h floor changes nothing today and only guards the future.
+  for (const hours of [8, 4, 4.25, 4.5]) {
+    const verdict = judge({ ...ROW, hours }, { config: { minShiftHours: 3 }, now: NOW });
+    assert.equal(verdict.take, true, `${hours}h should clear a 3h floor`);
+  }
+});
+
 test('a bid or a trade is never claimed', () => {
   for (const mode of ['bid', 'trade', 'locked', 'mine']) {
     const verdict = judge({ ...ROW, mode }, { mine: [], config: {}, now: NOW });

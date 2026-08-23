@@ -106,19 +106,47 @@ export function matchShift(board, wanted) {
 
 /* ---------- rules ---------- */
 
-// One shift, one verdict, with the reason spelled out. Cheapest and most
-// absolute checks first.
-export function judge(shift, { mine: rawMine = [], config = {}, now = Date.now() } = {}) {
+// The rules that need nothing but the shift's own description: how long it is,
+// when it starts, what day it falls on. Split out because the alert email carries
+// all three, so a shift that fails here can be refused without reading the board
+// at all. One definition, called from both the pre-screen and judge().
+export function screenByDescription(shift, { config = {}, now = Date.now() } = {}) {
   const {
-    maxHoursPerWeek = null,
+    // A short shift is not worth the trip. Inclusive, so 3 means "3 hours or
+    // longer is fine": every one of the 56 real alerts was 4h or more, so this
+    // excludes nothing seen so far and exists for the day something short turns
+    // up. Set 3.01 if a shift of exactly three hours should also be refused.
+    minShiftHours = 0,
     // The real alert on 2026-08-13 went out at 10:30 for a shift starting at
     // 12:45, so 135 minutes of notice. The old default of 180 would have thrown
     // that shift away. Anything above about two hours rejects the mail this
     // whole feature exists to act on.
     minNoticeMinutes = 60,
+    blackoutDates = [],
+  } = config;
+
+  if (Number(shift.hours) < minShiftHours) {
+    return { take: false, why: `${shift.hours}h is under the ${minShiftHours}h minimum` };
+  }
+
+  const day = shift.start.slice(0, 10);
+  if (blackoutDates.includes(day)) return { take: false, why: `${day} is blacked out` };
+
+  if (at(shift.start) - now < minNoticeMinutes * MINUTE) {
+    const mins = Math.round((at(shift.start) - now) / MINUTE);
+    return { take: false, why: `starts in ${mins} min, under the ${minNoticeMinutes} min notice I want` };
+  }
+
+  return { take: true, why: 'clear' };
+}
+
+// One shift, one verdict, with the reason spelled out. Cheapest and most
+// absolute checks first.
+export function judge(shift, { mine: rawMine = [], config = {}, now = Date.now() } = {}) {
+  const {
+    maxHoursPerWeek = null,
     minGapMinutes = 0,
     skipOverlaps = true,
-    blackoutDates = [],
   } = config;
 
   const mine = rawMine.filter(readable);
@@ -136,13 +164,11 @@ export function judge(shift, { mine: rawMine = [], config = {}, now = Date.now()
     return { take: false, why: `not a one-click claim (${shift.mode})` };
   }
 
-  const day = shift.start.slice(0, 10);
-  if (blackoutDates.includes(day)) return { take: false, why: `${day} is blacked out` };
-
-  if (at(shift.start) - now < minNoticeMinutes * MINUTE) {
-    const mins = Math.round((at(shift.start) - now) / MINUTE);
-    return { take: false, why: `starts in ${mins} min, under the ${minNoticeMinutes} min notice I want` };
-  }
+  // Re-run against the real row, not just the email's description of it. The
+  // board is the authority on the times, and the pre-screen ran against what the
+  // mail claimed they were.
+  const described = screenByDescription(shift, { config, now });
+  if (!described.take) return described;
 
   if (skipOverlaps && mine.some((held) => overlaps(shift, held))) {
     return { take: false, why: 'overlaps a shift already held' };
@@ -233,6 +259,18 @@ export function createClaimer({
       hours: wanted.hours,
       why: `${wanted.location}, released by ${wanted.releasedBy ?? 'someone'}`,
     });
+
+    // Before the board read, because the mail already says how long the shift is
+    // and when it starts. A shift under the minimum should cost zero requests at
+    // the one endpoint that rate limits, not one.
+    const screened = screenByDescription(wanted, { config, now: now() });
+    if (!screened.take) {
+      record({
+        kind: 'skipped', station: wanted.station, start: wanted.start, why: `${screened.why} (no board read)`,
+      });
+      handling -= 1;
+      return { claimed: false, why: screened.why };
+    }
 
     try {
       // One request, aimed at the one date the email named. This is the only

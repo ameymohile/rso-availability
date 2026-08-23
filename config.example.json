@@ -20,5 +20,15 @@
   "maps": {
     "campus": "",
     "stations": {}
+  },
+  "_claim": "Claiming from the TeamWork alert email. checkOnly runs the whole path and asks TeamWork whether the shift is claimable instead of taking it, which is how to prove the plumbing without committing to work; set it false to claim for real. minShiftHours is inclusive, so 3 means three hours or longer is fine. minShiftHours, minNoticeMinutes and blackoutDates are all knowable from the email alone, so a shift failing them costs no board read at all. minNoticeMinutes above ~120 rejects the mail this feature exists to act on: the real alert on 2026-08-13 gave 135 minutes.",
+  "claim": {
+    "checkOnly": true,
+    "minShiftHours": 3,
+    "maxHoursPerWeek": 20,
+    "minNoticeMinutes": 60,
+    "minGapMinutes": 0,
+    "skipOverlaps": true,
+    "blackoutDates": []
   }
 }

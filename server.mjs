@@ -10,16 +10,12 @@ import { readFile, appendFile } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
-import { createMadMax } from './madmax.mjs';
 import { notify } from './notify.mjs';
-import { createMailWatch } from './mailwatch.mjs';
 import { createGate } from './gate.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
-import { createAwake } from './awake.mjs';
-import { keychainPassword } from './tmwork.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
@@ -36,22 +32,6 @@ async function getSession() {
   const session = await connect(config);
   cached = { session, at: Date.now() };
   return session;
-}
-
-// Signing in is four sequential requests: /signin, the POST, /emp/, then the
-// token scrape. That is a second or more, and a lazy session meant it landed in
-// front of whichever sweep happened to cross the TTL, delaying both the
-// detection and the claim on that sweep. Rotating an ageing session after a
-// sweep instead pays the cost in the idle gap. Only while armed, so an unused
-// server is not signing in on a timer.
-async function rotateSessionIfAgeing() {
-  if (!cached || Date.now() - cached.at < SESSION_TTL_MS * 0.8) return;
-  try {
-    cached = { session: await connect(config), at: Date.now() };
-  } catch {
-    // Better to make the next caller sign in than to hold a broken session.
-    cached = null;
-  }
 }
 
 // Only an expired session is worth retrying. Retrying anything else doubles the
@@ -120,92 +100,17 @@ async function getShifts({ allowStale = false } = {}) {
   return refreshShifts();
 }
 
-// Held only while armed. See awake.mjs: this stops idle sleep, which is what was
-// making an ARMED panel meaningless, but it cannot stop lid-close sleep.
-const awake = createAwake({
-  onEvent: (event) => {
-    console.log(`awake: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
-    if (event.kind === 'awake-lost') {
-      madmax.note({ kind: 'error', why: 'lost the wake assertion, the machine can sleep again' });
-    }
-  },
-});
-
-// Armed state lives here and nowhere else, so restarting the server disarms it.
-const madmax = createMadMax({
-  config: config.madmax ?? {},
-  intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
-  loadBoard: () => boardShifts(),
-  loadMine: async () => (await getShifts({ allowStale: true })).all,
-  claim: async (shift) => {
-    const result = await swapWrite((s) => claimShift(s, shift));
-    // What I hold just changed, so the 5 minute cache is wrong now. Leaving it
-    // meant the next sweep planned against a schedule missing the shift it had
-    // just taken, and claimed straight through the weekly cap.
-    shiftCache = null;
-    return result;
-  },
-  check: (shift) => swapWrite((s) => checkClaim(s, shift)),
-  afterSweep: rotateSessionIfAgeing,
-  onArmChange: (armed) => (armed ? awake.hold() : awake.release()),
-  onEvent: (event) => {
-    console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
-    appendJsonl(MADMAX_LOG, event);
-
-    const when = event.start ? new Date(event.start).toLocaleString(undefined, {
-      weekday: 'short', hour: 'numeric', minute: '2-digit',
-    }) : '';
-
-    if (event.kind === 'claimed') {
-      notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
-    }
-
-    // A shift was on the board and the claim did not land. Somebody else got
-    // there first, or the server refused it, and the reason is in the event.
-    if (event.kind === 'failed') {
-      notify('Claim failed', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? 'unknown'}`, { sound: 'Sosumi' });
-    }
-
-    if (event.kind === 'checked') {
-      notify('Claim check (nothing taken)', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? ''}`, { sound: 'Ping' });
-    }
-  },
-});
-
-// Push, not polling. A shift that lives a second is invisible to any safe poll
-// rate, so the interval becomes a safety net and this becomes the fast path.
-const mailWatch = createMailWatch({
-  config: config.mail ?? {},
-  password: config.mail?.user ? keychainPassword(config.mail.user, { optional: true }) : null,
-  onTrigger: (reason) => madmax.trigger(reason),
-  onEvent: (event) => {
-    if (event.kind === 'mail-status') return;
-    console.log(`mail: ${event.kind}${event.subject ? ` ${event.subject}` : ''}${event.why ? ` (${event.why})` : ''}`);
-    // Kept even when it does not trigger. If a shift is posted and no mail
-    // arrives, this file is the evidence that email is not the route.
-    appendJsonl(MAIL_LOG, { at: new Date().toISOString(), ...event });
-  },
-});
-
 // Closing the lid suspends this process instead of killing it, so launchd sees
-// nothing wrong and never restarts it, and on wake the sweep resumes as if
-// nothing happened. Saying so out loud matters more than it sounds: a panel
-// reading "swept just now" after a night asleep claims coverage that never
-// existed, and the decision to trust the bot depends on knowing the difference.
+// nothing wrong and never restarts it. Saying so out loud matters more than it
+// sounds: a page reading "checked just now" after a night asleep claims coverage
+// that never existed.
 let lastGap = null;
 
 const heartbeat = createHeartbeat({
   onGap: (gapMs) => {
     const minutes = Math.round(gapMs / 60000);
     lastGap = { at: new Date().toISOString(), minutes };
-
-    madmax.note({ kind: 'gap', why: `not running for ~${minutes} min (lid closed or asleep). Shifts posted then were missed.` });
     console.warn(`heartbeat: ${minutes} min gap, process was suspended`);
-
-    // The socket did not survive the suspend even though it may still look open,
-    // so rebuild it now rather than waiting out its timeout with the fast path
-    // quietly dead.
-    mailWatch.reconnect('woke after a gap');
   },
 });
 
@@ -244,7 +149,6 @@ function noteSwapRefusal(err) {
     console.error('could not persist the lockout:', writeErr.message);
   }
 
-  madmax.disarm();
   notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
   console.error('swapboard locked out, resting 31 min');
 }
@@ -274,22 +178,9 @@ async function boardShifts() {
   }
 }
 
-// Claiming and checking are swap endpoints too, so they sit behind the same gate.
-async function swapWrite(fn) {
-  if (swapLocked()) throw restingError();
-  try {
-    return await withSession(fn);
-  } catch (err) {
-    noteSwapRefusal(err);
-    throw err;
-  }
-}
-
 // JSONL because appending a line cannot corrupt the ones before it.
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const HISTORY = logPath('history.jsonl');
-const MADMAX_LOG = logPath('madmax-log.jsonl');
-const MAIL_LOG = logPath('mail-log.jsonl');
 
 // Logs are a nicety. Never fail real work because one could not be written.
 async function appendJsonl(file, entry) {
@@ -482,18 +373,6 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { history: await readHistory() });
     }
 
-    if (pathname === '/api/madmax' && req.method === 'GET') {
-      return sendJson(res, 200, {
-        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap, awake: awake.held,
-      });
-    }
-
-    if (pathname === '/api/madmax' && req.method === 'POST') {
-      const { armed } = await readBody(req);
-      const state = armed ? madmax.arm() : madmax.disarm();
-      return sendJson(res, 200, { ...state, rules: config.madmax ?? {} });
-    }
-
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {
       const { all } = await getShifts();
       const result = await syncCalendar(all, config.calendar);
@@ -524,22 +403,5 @@ server.listen(PORT, HOST, () => {
   // Warm the cache so the first calendar poll never waits on a cold sign-in.
   refreshShifts().catch((err) => console.error('warm-up failed,', err.message));
 
-  // Watching costs nothing at TeamWork, so it runs whether or not Mad Max is
-  // armed: the log then answers "does a posted shift even generate mail" long
-  // before anyone needs the trigger to work.
-  mailWatch.start();
-  const mail = mailWatch.status;
-  console.log(mail.configured
-    ? `mail watch: ${config.mail.user} via ${config.mail.host}`
-    : 'mail watch: not configured (see config.example.json "mail")');
-
   heartbeat.start();
 });
-
-// A watcher holding an IMAP socket would otherwise keep the process alive.
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    awake.release();
-    mailWatch.stop().finally(() => process.exit(0));
-  });
-}

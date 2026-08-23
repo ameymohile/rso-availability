@@ -11,3 +11,4 @@ madmax-log.jsonl
 server.log
 .swap-lockout
 mail-log.jsonl
+probe-out/

@@ -16,6 +16,7 @@ import { syncCalendar } from './calendar-sync.mjs';
 import { notify } from './notify.mjs';
 import { createGate } from './gate.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
+import { createAwake } from './awake.mjs';
 import { createClaimer } from './claimer.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
@@ -112,6 +113,15 @@ const heartbeat = createHeartbeat({
     const minutes = Math.round(gapMs / 60000);
     lastGap = { at: new Date().toISOString(), minutes };
     console.warn(`heartbeat: ${minutes} min gap, process was suspended`);
+
+    // Written where the claims are, because "nothing was posted" and "I was not
+    // awake to hear about it" look identical otherwise, and only one of them is
+    // worth doing something about.
+    appendJsonl(CLAIM_LOG, {
+      at: new Date().toISOString(),
+      kind: 'gap',
+      why: `asleep or suspended for ~${minutes} min. Alerts that arrived then were missed.`,
+    });
   },
 });
 
@@ -207,6 +217,30 @@ async function swapWrite(fn) {
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const HISTORY = logPath('history.jsonl');
 const CLAIM_LOG = logPath('claim-log.jsonl');
+
+// A claimer on a sleeping laptop is not a claimer. The alert arrives by Mail
+// rule, and a Mail rule does not run while the machine is asleep: the mail is
+// simply there when it wakes, minutes or hours late, and the shift is long gone.
+// Measured on this machine before anything held it awake: 434 minutes asleep out
+// of a 421 minute window.
+//
+// So the assertion is held for as long as claiming is enabled, and no longer.
+// `claim.keepAwake: false` turns it off for anyone who would rather have the
+// battery. It cannot beat closing the lid, which ignores power assertions
+// outright, so a closed lid still means missed shifts.
+const awake = createAwake({
+  reason: 'RSO claimer live',
+  onEvent: (event) => {
+    console.log(`awake: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
+    if (event.kind === 'awake-lost') {
+      appendJsonl(CLAIM_LOG, {
+        at: new Date().toISOString(),
+        kind: 'error',
+        why: 'lost the wake assertion, the machine can sleep through alerts now',
+      });
+    }
+  },
+});
 
 // An alert arrives, one day of the board is read, and the shift it named is
 // claimed. No timer, no polling: if no mail arrives, this does nothing at all.
@@ -457,7 +491,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/claimer' && req.method === 'GET') {
-      return sendJson(res, 200, { ...claimer.state, lastGap });
+      // `awake` and `lastGap` belong next to the rules, because whether this is
+      // actually listening matters more than what it would do if it were.
+      return sendJson(res, 200, { ...claimer.state, awake: awake.held, lastGap });
     }
 
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {
@@ -491,4 +527,24 @@ server.listen(PORT, HOST, () => {
   refreshShifts().catch((err) => console.error('warm-up failed,', err.message));
 
   heartbeat.start();
+
+  // Live means live: nothing to arm, because the trigger is an email rather than
+  // a timer, so the only question is whether this process is awake to receive it.
+  if (config.claim?.keepAwake !== false) awake.hold();
+
+  const rules = config.claim ?? {};
+  console.log(rules.checkOnly
+    ? 'claimer: CHECK ONLY, alerts are evaluated and nothing is taken'
+    : `claimer: LIVE, will claim shifts starting ${rules.minNoticeMinutes ?? 180}+ min out`
+      + `${rules.maxHoursPerWeek != null ? `, up to ${rules.maxHoursPerWeek}h a week` : ', with NO weekly cap'}`);
+  console.log(`claimer: machine held awake = ${awake.held}`);
 });
+
+// caffeinate is a child process, so it has to be let go deliberately or it
+// outlives the server that asked for it.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    awake.release();
+    process.exit(0);
+  });
+}

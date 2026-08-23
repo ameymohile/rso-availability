@@ -24,6 +24,7 @@
   "_claim": "Claiming from the TeamWork alert email. checkOnly runs the whole path and asks TeamWork whether the shift is claimable instead of taking it, which is how to prove the plumbing without committing to work; set it false to claim for real. minNoticeMinutes is how far out the shift must start: measured over 56 real alerts, 180 keeps 48 and skips 8, all of which were genuinely short notice (60 to 138 minutes). It and blackoutDates are decided from the email alone, so a shift failing them costs no board read. There is no minimum-duration rule because every real shift was 4h, 4.25h, 4.5h or 8h, so one could never fire.",
   "claim": {
     "checkOnly": true,
+    "keepAwake": true,
     "minNoticeMinutes": 180,
     "maxHoursPerWeek": 20,
     "minGapMinutes": 0,

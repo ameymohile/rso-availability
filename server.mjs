@@ -617,6 +617,28 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    // One tap from the board. The refusal text is passed straight through
+    // because TeamWork's own reason ("Times open in schedule?") is more useful
+    // than anything this layer could invent.
+    if (pathname === '/api/claim' && req.method === 'POST') {
+      const { id, locId } = await readBody(req);
+      if (id == null || locId == null) {
+        return sendJson(res, 400, { error: 'claim needs id and locId' });
+      }
+
+      try {
+        const claimed = await claimShift(await getSession(), { id, locId });
+        // The roster just changed, so anything derived from it is stale.
+        shiftCache = null;
+        await appendJsonl(CLAIM_LOG, { at: claimed.claimedAt, kind: 'claimed', id, locId, via: 'one-tap', ms: claimed.ms });
+        notify('Shift claimed', `id ${id}`, { sound: 'Glass' });
+        return sendJson(res, 200, { claimed: true, ...claimed });
+      } catch (err) {
+        await appendJsonl(CLAIM_LOG, { at: new Date().toISOString(), kind: 'refused', id, locId, via: 'one-tap', why: err.message });
+        return sendJson(res, 200, { claimed: false, why: err.message });
+      }
+    }
+
     // Availability is wiped weekly, so "what I had last time" is the common want.
     if (pathname === '/api/last-week' && req.method === 'GET') {
       const [previous] = await readHistory(1);

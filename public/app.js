@@ -584,17 +584,55 @@ function buildOpenRow(shift, isNew) {
   if (clash) place.classList.add('clash');
   body.append(time, place);
 
-  // The claim write has never been observed, and guessing at a request that
-  // commits you to a shift is not acceptable. Hands off to TeamWork until then.
-  const claim = document.createElement('a');
+  // One tap, no confirmation. A shift can be dropped up to an hour before it
+  // starts, and hesitating loses the race, so the undo is TeamWork's not ours.
+  const claim = document.createElement('button');
+  claim.type = 'button';
   claim.className = 'claim';
-  claim.textContent = 'Claim ↗';
-  claim.href = 'https://www.tmwork.net/emp/#!sch-swapboard';
-  claim.target = '_blank';
-  claim.rel = 'noopener';
+  claim.textContent = 'Claim';
+  claim.addEventListener('click', () => claimNow(shift, claim, place, clash));
 
   li.append(when, body, claim);
   return li;
+}
+
+// A clashing shift is refused by TeamWork with 417, so say so before spending
+// the request rather than after.
+async function claimNow(shift, button, place, clash) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = clash ? 'Trying…' : 'Claiming…';
+
+  try {
+    const result = await api('/api/claim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: shift.id, locId: shift.locId }),
+    });
+
+    if (result.claimed) {
+      button.textContent = 'Claimed';
+      button.classList.add('done');
+      // The roster changed, so pull both the board and my shifts again.
+      checkOpenShifts();
+      api('/api/shifts')
+        .then((data) => { allShifts = data.all ?? data.shifts; renderShifts(data.shifts); })
+        .catch(() => {});
+      return;
+    }
+
+    button.textContent = 'Refused';
+    button.classList.add('refused');
+    button.disabled = false;
+    // TeamWork's own wording, trimmed of the request line in front of it.
+    place.append(document.createTextNode(` · ${result.why.replace(/^.*?-> \d+ /, '')}`));
+    place.classList.add('clash');
+  } catch (err) {
+    button.textContent = 'Failed';
+    button.classList.add('refused');
+    button.disabled = false;
+    console.warn('claim failed:', err.message);
+  }
 }
 
 function renderOpenShifts() {
@@ -625,11 +663,6 @@ function renderOpenShifts() {
     list.append(buildOpenRow(shift, !openSeen.has(shift.id)));
   }
   el.openBody.append(list);
-
-  const note = document.createElement('p');
-  note.className = 'foot-note';
-  note.textContent = 'Claim opens TeamWork for now. One-tap claiming needs one real shift captured first.';
-  el.openBody.append(note);
 
   syncChecked();
 }

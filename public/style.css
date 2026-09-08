@@ -1109,3 +1109,9 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 .cl-line.claimed .cl-kind { color: var(--accent); }
 .cl-line.gone .cl-kind, .cl-line.error .cl-kind { color: var(--danger); }
 .cl-line.gap .cl-kind { color: #d9a13b; }
+
+/* Claim is a real action now, not a link out. */
+button.claim { border: none; font-family: inherit; cursor: pointer; }
+button.claim:disabled { cursor: default; opacity: 0.75; }
+.claim.done { background: var(--accent); color: #fff; opacity: 1; }
+.claim.refused { background: var(--danger); color: #fff; }

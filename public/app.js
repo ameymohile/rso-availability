@@ -36,31 +36,18 @@ const el = {
   payRows: document.getElementById('payRows'),
   payNote: document.getElementById('payNote'),
   payToggle: document.getElementById('payToggle'),
+  claimer: document.getElementById('claimer'),
+  clToggle: document.getElementById('clToggle'),
+  clState: document.getElementById('clState'),
+  clRules: document.getElementById('clRules'),
+  clRoom: document.getElementById('clRoom'),
+  clLog: document.getElementById('clLog'),
   syncCal: document.getElementById('syncCal'),
   backdrop: document.getElementById('backdrop'),
   sheetTitle: document.getElementById('sheetTitle'),
   sheetBody: document.getElementById('sheetBody'),
   sheetOk: document.getElementById('sheetOk'),
   sheetCancel: document.getElementById('sheetCancel'),
-  madmax: document.getElementById('madmax'),
-  mmState: document.getElementById('mmState'),
-  mmRules: document.getElementById('mmRules'),
-  mmToggle: document.getElementById('mmToggle'),
-  mmLog: document.getElementById('mmLog'),
-  mmWires: document.getElementById('mmWires'),
-  mmWirePush: document.getElementById('mmWirePush'),
-  mmWirePoll: document.getElementById('mmWirePoll'),
-  mmPushNote: document.getElementById('mmPushNote'),
-  mmPollNote: document.getElementById('mmPollNote'),
-  mmTallies: document.getElementById('mmTallies'),
-  armBackdrop: document.getElementById('armBackdrop'),
-  armRules: document.getElementById('armRules'),
-  armWarn: document.getElementById('armWarn'),
-  slideArm: document.getElementById('slideArm'),
-  armSlider: document.getElementById('armSlider'),
-  armFill: document.getElementById('armFill'),
-  armLabel: document.getElementById('armLabel'),
-  armCancel: document.getElementById('armCancel'),
 };
 
 // `live` is what TeamWork confirmed it holds; `draft` is what the switches show.
@@ -597,17 +584,55 @@ function buildOpenRow(shift, isNew) {
   if (clash) place.classList.add('clash');
   body.append(time, place);
 
-  // The claim write has never been observed, and guessing at a request that
-  // commits you to a shift is not acceptable. Hands off to TeamWork until then.
-  const claim = document.createElement('a');
+  // One tap, no confirmation. A shift can be dropped up to an hour before it
+  // starts, and hesitating loses the race, so the undo is TeamWork's not ours.
+  const claim = document.createElement('button');
+  claim.type = 'button';
   claim.className = 'claim';
-  claim.textContent = 'Claim ↗';
-  claim.href = 'https://www.tmwork.net/emp/#!sch-swapboard';
-  claim.target = '_blank';
-  claim.rel = 'noopener';
+  claim.textContent = 'Claim';
+  claim.addEventListener('click', () => claimNow(shift, claim, place, clash));
 
   li.append(when, body, claim);
   return li;
+}
+
+// A clashing shift is refused by TeamWork with 417, so say so before spending
+// the request rather than after.
+async function claimNow(shift, button, place, clash) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = clash ? 'Trying…' : 'Claiming…';
+
+  try {
+    const result = await api('/api/claim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: shift.id, locId: shift.locId }),
+    });
+
+    if (result.claimed) {
+      button.textContent = 'Claimed';
+      button.classList.add('done');
+      // The roster changed, so pull both the board and my shifts again.
+      checkOpenShifts();
+      api('/api/shifts')
+        .then((data) => { allShifts = data.all ?? data.shifts; renderShifts(data.shifts); })
+        .catch(() => {});
+      return;
+    }
+
+    button.textContent = 'Refused';
+    button.classList.add('refused');
+    button.disabled = false;
+    // TeamWork's own wording, trimmed of the request line in front of it.
+    place.append(document.createTextNode(` · ${result.why.replace(/^.*?-> \d+ /, '')}`));
+    place.classList.add('clash');
+  } catch (err) {
+    button.textContent = 'Failed';
+    button.classList.add('refused');
+    button.disabled = false;
+    console.warn('claim failed:', err.message);
+  }
 }
 
 function renderOpenShifts() {
@@ -638,11 +663,6 @@ function renderOpenShifts() {
     list.append(buildOpenRow(shift, !openSeen.has(shift.id)));
   }
   el.openBody.append(list);
-
-  const note = document.createElement('p');
-  note.className = 'foot-note';
-  note.textContent = 'Claim opens TeamWork for now. One-tap claiming needs one real shift captured first.';
-  el.openBody.append(note);
 
   syncChecked();
 }
@@ -1055,7 +1075,6 @@ async function load() {
 
   refreshHistory();
   checkOpenShifts();
-  loadMadMax();
 }
 
 // The toggles are TeamWork's state, so a reset has to reach the page. Skipped
@@ -1189,208 +1208,133 @@ el.payToggle.addEventListener('click', () => {
   paintPay(payVisible);
 });
 
-/* ---------- mad max ---------- */
 
-let mm = { armed: false, rules: {} };
+/* ---------- shift claimer ---------- */
+
+// The claimer is a server-side thing that runs whether or not this page is open,
+// so everything here is a readout of state that lives elsewhere. The one piece of
+// control is the switch, and it posts rather than remembering anything locally.
+let cl = { paused: true, rules: {}, log: [] };
 
 const hoursOfMinutes = (mins) => `${Math.round(mins / 60)}h`;
 
-const mmRuleText = (rules) => [
-  rules.maxHoursPerWeek ? `${rules.maxHoursPerWeek}h/wk cap` : null,
+// Why it would refuse something, in the order it would refuse it. Spelled out
+// because a switch that says ON while a rule quietly blocks everything is worse
+// than no switch.
+const claimRuleText = (rules) => [
   rules.minNoticeMinutes ? `${hoursOfMinutes(rules.minNoticeMinutes)} notice` : null,
-  rules.minGapMinutes ? `${hoursOfMinutes(rules.minGapMinutes)} gap` : null,
+  rules.maxHoursPerWeek != null ? `${rules.maxHoursPerWeek}h/wk cap` : 'no weekly cap',
+  rules.minGapMinutes ? `${hoursOfMinutes(rules.minGapMinutes)} between shifts` : null,
   rules.skipOverlaps ? 'no overlaps' : null,
-  rules.blackoutDates?.length ? `${rules.blackoutDates.length} blackout` : null,
+  rules.blackoutDates?.length ? `${rules.blackoutDates.length} blackout date(s)` : null,
+  rules.checkOnly ? 'CHECK ONLY, takes nothing' : null,
 ].filter(Boolean).join(' · ');
 
-// The push path is the one that can win a one-second race, so its state is
-// spelled out rather than left to be inferred from whether claims happen.
-const PUSH_STATE = {
-  watching: ['live', 'watching'],
-  reconnecting: ['warn', 'reconnecting'],
-  unconfigured: ['off', 'not configured'],
-  off: ['off', 'off'],
-};
+function renderClaimer() {
+  const { paused, rules = {}, log = [], room = [], awake, lastGap, warm, roomAt } = cl;
+  const live = !paused;
 
-function renderWires() {
-  const { armed, lastRun, lastCause, mail = {}, log = [] } = mm;
-  el.mmWires.hidden = !armed;
-  if (!armed) return;
+  el.claimer.classList.toggle('live', live);
+  el.clToggle.setAttribute('aria-checked', String(live));
+  el.clRules.textContent = claimRuleText(rules);
 
-  const [pushClass, pushLabel] = PUSH_STATE[mail.state] ?? PUSH_STATE.off;
-  el.mmWirePush.className = `mm-wire ${pushClass}`;
-  el.mmPushNote.textContent = mail.lastTrigger
-    ? `${pushLabel} · fired ${relativeTime(mail.lastTrigger.at)}`
-    : mail.lastMail
-      ? `${pushLabel} · last mail ${relativeTime(mail.lastMail.at)}`
-      : pushLabel;
+  // Awake is part of whether it is on. A live claimer on a sleeping laptop hears
+  // nothing, and the panel should not imply otherwise.
+  // A cold session costs 855ms of sign-in on the one request that matters, so it
+  // is worth saying out loud rather than leaving to be inferred from a slow claim.
+  const cold = live && warm && warm.session === false;
+  const warn = live && (awake === false || cold);
+  el.clState.classList.toggle('warn', warn || Boolean(lastGap));
+  el.clState.textContent = !live
+    ? 'off'
+    : awake === false
+      ? 'on · MACHINE CAN SLEEP'
+      : cold
+        ? 'on · COLD, first claim pays sign-in'
+        : lastGap
+          ? `on · missed ~${lastGap.minutes} min`
+          : `on · listening${warm?.lastPing?.warm ? ' · warm' : ''}`;
 
-  // Naming the cause matters: a sweep that ran because mail arrived is the fast
-  // path working, and one that ran on the clock is only the safety net.
-  el.mmWirePoll.className = 'mm-wire live';
-  el.mmPollNote.textContent = lastRun
-    ? `${relativeTime(lastRun)}${lastCause && lastCause !== 'poll' ? ` · via ${lastCause.split(':')[0]}` : ''}`
-    : 'idle';
+  // Only weeks that still have room, plus any that are full, because "on but this
+  // week is full" is invisible otherwise until an alert gets skipped.
+  const cap = rules.maxHoursPerWeek;
+  const upcoming = room.filter((w) => w.week >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10));
+  // Shifts claimed by hand in TeamWork cannot invalidate our cache, so these
+  // numbers can be up to five minutes behind. Saying when they are from beats
+  // looking stale for no stated reason.
+  const ageMs = roomAt ? Date.now() - new Date(roomAt).getTime() : 0;
+  const stale = ageMs > 90_000
+    ? Object.assign(document.createElement('span'), {
+      className: 'cl-week stale',
+      textContent: `as of ${Math.round(ageMs / 60000)}m ago`,
+      title: 'hours are read from a 5 minute cache; a shift claimed by hand in TeamWork lands here late',
+    })
+    : null;
 
-  const tally = (kind) => log.filter((e) => e.kind === kind).length;
-  const counts = [
-    `${tally('claimed')} claimed`,
-    `${tally('failed')} lost`,
-    `${tally('skipped')} skipped`,
-  ].join(' · ');
+  el.clRoom.replaceChildren(...upcoming.slice(0, 4).map((w) => {
+    const span = document.createElement('span');
+    const full = cap != null && w.room <= 0;
+    span.className = `cl-week${full ? ' full' : ''}`;
+    span.textContent = cap == null
+      ? `${w.week.slice(5)} ${w.booked}h`
+      : `${w.week.slice(5)} ${w.booked}/${cap}h`;
+    span.title = full ? 'full, nothing will be claimed this week' : `${w.room}h of room`;
+    return span;
+  }), ...(stale ? [stale] : []));
 
-  // A gap outranks the counts. Closing the lid suspends the whole thing, and
-  // "swept just now" after waking would claim coverage that never happened.
-  // Losing the wake assertion outranks even that, because then every future
-  // sweep is in doubt rather than one past window.
-  const gap = mm.lastGap;
-  const warn = !mm.awake || Boolean(gap);
-  el.mmTallies.classList.toggle('warn', warn);
-
-  el.mmTallies.textContent = !mm.awake
-    ? `this Mac can sleep, so it will stop looking · ${counts}`
-    : gap
-      ? `asleep ${gap.minutes} min, missed anything posted then · ${counts}`
-      : counts;
-}
-
-function renderMadMax() {
-  const { armed, lastRun, intervalMs, rules, log = [] } = mm;
-
-  el.madmax.classList.toggle('armed', armed);
-  el.mmToggle.textContent = armed ? 'DISARM' : 'ARM';
-  el.mmToggle.className = `mm-btn${armed ? ' live' : ''}`;
-  el.mmRules.textContent = mmRuleText(rules);
-
-  // Rounding turned a 1.5s sweep into "2s", which misreports the setting.
-  const seconds = (intervalMs ?? 45000) / 1000;
-  const every = Number.isInteger(seconds) ? seconds : seconds.toFixed(1);
-
-  el.mmState.textContent = armed
-    ? `ARMED · every ${every}s${lastRun ? ` · swept ${relativeTime(lastRun)}` : ''}`
-    : 'disarmed';
-
-  renderWires();
-
-  el.mmLog.hidden = !armed || !log.length;
-  el.mmLog.replaceChildren(...log.slice(0, 8).map((event) => {
+  el.clLog.hidden = !log.length;
+  el.clLog.replaceChildren(...log.slice(0, 6).map((event) => {
     const li = document.createElement('li');
-    li.className = `mm-line ${event.kind}`;
+    li.className = `cl-line ${event.kind}`;
 
     const when = document.createElement('span');
-    when.className = 'mm-when';
-    when.textContent = new Date(event.at).toLocaleTimeString(undefined, { hour12: false });
+    when.className = 'cl-when mono';
+    when.textContent = new Date(event.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     const kind = document.createElement('span');
-    kind.className = 'mm-kind';
+    kind.className = 'cl-kind mono';
     kind.textContent = event.kind;
 
     const what = document.createElement('span');
-    what.className = 'mm-what';
-    what.textContent = [event.station, event.why].filter(Boolean).join(' · ');
+    what.className = 'cl-what';
+    what.textContent = [event.station, event.why].filter(Boolean).join(' — ');
 
     li.append(when, kind, what);
     return li;
   }));
 }
 
-async function loadMadMax() {
+async function loadClaimer() {
   try {
-    mm = await api('/api/madmax');
-    renderMadMax();
+    cl = await api('/api/claimer');
+    renderClaimer();
   } catch (err) {
-    console.warn('madmax state unavailable:', err.message);
+    el.clState.textContent = 'unavailable';
+    console.warn('claimer state unavailable:', err.message);
   }
 }
 
-function openArmSheet() {
-  el.armRules.replaceChildren(...[
-    mm.rules.maxHoursPerWeek && `will not pass ${mm.rules.maxHoursPerWeek}h in any week`,
-    mm.rules.minNoticeMinutes && `ignores shifts starting within ${hoursOfMinutes(mm.rules.minNoticeMinutes)}`,
-    mm.rules.skipOverlaps && 'never takes a shift overlapping one you hold',
-    mm.rules.minGapMinutes && `keeps ${hoursOfMinutes(mm.rules.minGapMinutes)} clear of shifts you hold, so no back-to-back`,
-    mm.rules.blackoutDates?.length
-      ? `skips ${mm.rules.blackoutDates.length} blacked-out date(s)`
-      : 'no blackout dates set',
-    'disarms itself if the server restarts',
-  ].filter(Boolean).map((text) => {
-    const li = document.createElement('li');
-    li.textContent = text;
-    return li;
-  }));
-
-  // Said in the product, not just the README, and it has to track what the
-  // server will actually do. This text used to promise that claiming was not
-  // wired up long after it was, which is the worst possible thing for a
-  // confirmation dialog to be wrong about.
-  el.armWarn.textContent = mm.rules?.checkOnly
-    ? 'Check-only: it will find shifts and ask the server whether it could take them, '
-      + 'but it will not take them. Nothing gets claimed and nothing is committed.'
-    : 'This claims real shifts on your behalf, and a claim commits you to the work. '
-      + 'The claim request was reconstructed from TeamWork’s own client and has never been '
-      + 'confirmed against a live shift, so watch the first one.';
-
-  resetSlider();
-  el.armBackdrop.hidden = false;
-  el.armSlider.focus();
-}
-
-// Must reach the far end. Anything short snaps back, so a half-hearted drag is
-// the same as not doing it.
-const SLIDE_ARMED_AT = 97;
-
-function resetSlider() {
-  el.armSlider.value = 0;
-  el.armFill.style.width = '0%';
-  el.armLabel.style.opacity = '1';
-  el.slideArm.classList.remove('ready');
-}
-
-const closeArmSheet = () => {
-  el.armBackdrop.hidden = true;
-  resetSlider();
-};
-
-async function setArmed(armed) {
+el.clToggle.addEventListener('click', async () => {
+  // Optimistic would be wrong here: this commits real work, so the switch only
+  // moves once the server says it moved.
+  el.clToggle.disabled = true;
   try {
-    mm = await api('/api/madmax', {
+    cl = await api('/api/claimer', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ armed }),
+      body: JSON.stringify({ paused: !cl.paused }),
     });
-    renderMadMax();
+    renderClaimer();
   } catch (err) {
-    console.warn('madmax toggle failed:', err.message);
+    console.warn('claimer toggle failed:', err.message);
+  } finally {
+    el.clToggle.disabled = false;
   }
-}
-
-el.mmToggle.addEventListener('click', () => {
-  if (mm.armed) setArmed(false);
-  else openArmSheet();
 });
 
-el.armSlider.addEventListener('input', () => {
-  const at = Number(el.armSlider.value);
-  el.armFill.style.width = `${at}%`;
-  // The label fades out as the knob covers it rather than sitting underneath.
-  el.armLabel.style.opacity = String(Math.max(0, 1 - at / 45));
-  el.slideArm.classList.toggle('ready', at >= SLIDE_ARMED_AT);
-});
-
-// Fires on release, so a drag that stops short resets instead of arming.
-el.armSlider.addEventListener('change', () => {
-  if (Number(el.armSlider.value) < SLIDE_ARMED_AT) return resetSlider();
-  closeArmSheet();
-  setArmed(true);
-});
-
-el.armCancel.addEventListener('click', closeArmSheet);
-el.armBackdrop.addEventListener('click', (event) => {
-  if (event.target === el.armBackdrop) closeArmSheet();
-});
-
-// While armed the panel is live state, so keep it moving.
-setInterval(() => { if (mm.armed) loadMadMax(); }, 15000);
+loadClaimer();
+// Claims happen without this page, so the panel has to go looking for them.
+setInterval(loadClaimer, 20000);
 
 /* ---------- appearance ---------- */
 

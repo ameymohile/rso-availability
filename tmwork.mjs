@@ -2,6 +2,7 @@
 // API notes and how it was worked out: NOTES.md.
 
 import { execFileSync } from 'node:child_process';
+import { send } from './http.mjs';
 
 const BASE = 'https://www.tmwork.net';
 const KEYCHAIN_SERVICE = 'tmwork-rso';
@@ -75,15 +76,29 @@ const startOfWeek = (from) => {
   return d;
 };
 
-function getPassword(account) {
+// The Keychain is macOS only, and the strongest single thing that can be done
+// for this claimer is to run it somewhere that does not sleep when a lid closes.
+// So an env var is allowed to stand in. `envVar` is named by the caller rather
+// than assumed, because there are two different secrets in this project and one
+// variable standing in for both would hand the TeamWork password to a mail server.
+function fromEnv(envVar) {
+  const value = envVar ? process.env[envVar] : null;
+  return value && value.length ? value : null;
+}
+
+function getPassword(account, envVar) {
+  const supplied = fromEnv(envVar);
+  if (supplied) return supplied;
+
   try {
     return execFileSync('security', [
       'find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w',
     ], { encoding: 'utf8' }).trim();
   } catch {
     throw new Error(
-      'No Keychain entry found. Store it once with:\n'
-      + `  security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${account} -w`,
+      `No password for ${account}. Either store it in the Keychain:\n`
+      + `  security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${account} -w\n`
+      + `or set ${envVar ?? 'the password env var'}, which is how this runs off a Mac.`,
     );
   }
 }
@@ -95,7 +110,7 @@ function createSession(config) {
   let apiToken = null;
 
   function storeCookies(res) {
-    for (const line of res.headers.getSetCookie?.() ?? []) {
+    for (const line of res.setCookie ?? []) {
       const [pair] = line.split(';');
       const idx = pair.indexOf('=');
       if (idx > 0) jar.set(pair.slice(0, idx).trim(), pair.slice(idx + 1).trim());
@@ -104,23 +119,32 @@ function createSession(config) {
 
   const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 
+  // Whether the last reply came back on a socket that was already open. Measured
+  // rather than assumed, because "the claim went out on a warm connection" is
+  // exactly the kind of claim that is easy to believe and wrong.
+  let lastReusedSocket = null;
+
   async function request(url, options = {}, hops = 0) {
     if (hops > 5) throw new Error(`Too many redirects: ${url}`);
 
-    const res = await fetch(url, {
-      ...options,
-      redirect: 'manual',
+    const res = await send(url, {
+      method: options.method ?? 'GET',
+      body: options.body == null ? null : String(options.body),
       headers: {
         cookie: cookieHeader(),
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        // node:https does not decompress for us the way fetch did, and http.mjs
+        // only handles the encodings it can prove it can read.
+        'accept-encoding': 'gzip, identity',
         // /api/ rejects cookies alone with "Invalid Token". Both are required.
         ...(apiToken && url.includes('/api/') ? { 'x-api-token': apiToken } : {}),
         ...options.headers,
       },
     });
     storeCookies(res);
+    lastReusedSocket = res.reusedSocket;
 
-    const location = res.status >= 300 && res.status < 400 && res.headers.get('location');
+    const location = res.status >= 300 && res.status < 400 && res.location;
     // Redirects after a POST are followed as GET, per normal browser rules.
     return location
       ? request(new URL(location, url).href, { headers: options.headers }, hops + 1)
@@ -129,7 +153,7 @@ function createSession(config) {
 
   async function signIn(password) {
     const page = await request(`${BASE}/signin`);
-    const antiforgery = (await page.text())
+    const antiforgery = page.body
       .match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/)?.[1];
     if (!antiforgery) throw new Error('Could not find the antiforgery token on /signin');
 
@@ -145,13 +169,13 @@ function createSession(config) {
         EmpUser: config.employeeUser,
         EmpPassword: password,
         __RequestVerificationToken: antiforgery,
-      }),
+      }).toString(),
     });
 
     // A bad password re-renders the form instead of erroring, so a missing
     // APP.Token is how a silent failure shows up.
     const shell = await request(`${BASE}/emp/`);
-    apiToken = (await shell.text()).match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
+    apiToken = shell.body.match(/APP\.Token\s*=\s*'([^']+)'/)?.[1] ?? null;
     if (!apiToken) {
       throw new Error('Signed in but found no APP.Token in /emp/. The Keychain password is probably wrong.');
     }
@@ -162,10 +186,10 @@ function createSession(config) {
     if (!res.ok) {
       // The body carries the reason, e.g. the "Please wait [1.5] seconds"
       // throttle. Dropping it made rate limits look like generic failures.
-      const detail = (await res.text().catch(() => '')).slice(0, 200).trim();
-      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ''}`);
+      const detail = res.body.slice(0, 200).trim();
+      throw new Error(`GET ${path} -> ${res.status}${detail ? ` ${detail}` : ' (empty body)'}`);
     }
-    return res.json();
+    return JSON.parse(res.body);
   }
 
   async function putJson(path, payload) {
@@ -174,19 +198,28 @@ function createSession(config) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(`PUT ${path} -> ${res.status} ${res.body}`);
     return res;
   }
 
-  return { signIn, getJson, putJson };
+  return {
+    signIn,
+    getJson,
+    putJson,
+    // Read by the claim path so a cold-socket claim shows up in the log as slow
+    // for a reason, rather than just slow.
+    get warm() {
+      return lastReusedSocket;
+    },
+  };
 }
 
 // Exported so a second watcher can keep its own secret in the same Keychain
 // entry style instead of inventing another place to hold a password. `optional`
 // is for the mail watch, which is a feature you can simply not configure.
-export function keychainPassword(account, { optional = false } = {}) {
+export function keychainPassword(account, { optional = false, envVar } = {}) {
   try {
-    return getPassword(account);
+    return getPassword(account, envVar);
   } catch (err) {
     if (optional) return null;
     throw err;
@@ -195,7 +228,7 @@ export function keychainPassword(account, { optional = false } = {}) {
 
 export async function connect(config) {
   const session = createSession(config);
-  await session.signIn(getPassword(config.employeeUser));
+  await session.signIn(getPassword(config.employeeUser, 'TMWORK_PASSWORD'));
   return session;
 }
 
@@ -501,7 +534,7 @@ export async function claimShift(session, shift) {
 
   const query = `id=${encodeURIComponent(shift.id)}&bid=${encodeURIComponent(shift.locId)}&schid=`;
   const res = await session.putJson(`/api/shift/swap/quick-claim?${query}`);
-  const body = (await res.text().catch(() => '')).trim();
+  const body = res.body.trim();
 
   // Their client reads a null result as success and anything else as "N/A", so
   // a 200 carrying a message is a refusal. Going by the status code alone would
@@ -510,7 +543,9 @@ export async function claimShift(session, shift) {
     throw new Error(`refused: ${body.slice(0, 200)}`);
   }
 
-  return { id: shift.id, claimedAt: new Date().toISOString() };
+  return {
+    id: shift.id, claimedAt: new Date().toISOString(), ms: res.ms, warm: res.reusedSocket,
+  };
 }
 
 // Remembering the previous per-week counts is what lets a sweep tell a week
@@ -519,6 +554,29 @@ let lastWeekCounts = new Map();
 
 // swapboardCounts covers ~3 months in one request, so an empty board costs one
 // call. Only weeks with something get a detail fetch, which is rate limited.
+// One day of the board, for the one date an alert mail named.
+//
+// This is the whole rate-limited surface the email claimer touches: one request
+// per alert, `range=day` because the mail says which day, and no polling. The
+// counts-first sweep below exists for the page, which wants the whole horizon;
+// asking it for a single known date would spend two requests to answer a
+// question the mail already answered.
+//
+// Past dates are allowed through. An alert can arrive for a shift starting in
+// two hours, and refusing to look because the date is "today" would drop it.
+export async function loadBoardForDate(session, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '')) {
+    throw new Error(`board read needs a YYYY-MM-DD date, got ${JSON.stringify(date)}`);
+  }
+
+  const items = await session.getJson(`/api/shift/swapboard?date=${date}&range=day`);
+
+  return (items ?? [])
+    .filter((item) => item?.Start)
+    .map((item) => ({ ...toShift(item), offeredTo: Boolean(item.ToMe) }))
+    .sort((a, b) => a.at - b.at);
+}
+
 export async function loadOpenShifts(session) {
   // Their client anchors this on the first of the current month, not today
   // (getSwapCountUrl in emp/sch-swapboard.js), so match it and get the same

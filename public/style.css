@@ -1019,270 +1019,99 @@ button.state:hover { background: var(--panel-2); color: var(--text); }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* ---------- mad max ---------- */
+/* ---------- shift claimer ---------- */
 
-/* Deliberately unlike everything else. This one switches on a bot, so it should
-   never be mistaken for another settings row. */
-.madmax {
-  grid-column: 1 / -1;
-  border-color: var(--line);
-}
+/* This one commits you to real work, so it reads as live state rather than as
+   another settings row: a switch, the rules it would apply, and what it did. */
+.claimer { grid-column: 1 / -1; }
 
-.madmax.armed {
-  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
-  box-shadow: inset 0 1px 0 var(--edge), 0 0 0 1px color-mix(in srgb, var(--danger) 18%, transparent);
-}
+.claimer.live { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
-.mm-head {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 13px 18px;
-}
-
-.mm-badge {
+.cl-switch {
+  width: 42px;
+  height: 24px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  flex: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  color: var(--faint);
+  transition: background 0.16s ease, border-color 0.16s ease;
 }
 
-.mm-badge i {
-  width: 6px;
-  height: 6px;
+.cl-switch:disabled { opacity: 0.5; cursor: progress; }
+
+.cl-knob {
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--faint);
+  transition: transform 0.16s ease, background 0.16s ease;
 }
 
-.madmax.armed .mm-badge { color: var(--danger); }
-.madmax.armed .mm-badge i { background: var(--danger); animation: pulse 1.1s ease-in-out infinite; }
+.cl-switch[aria-checked="true"] {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  border-color: var(--accent);
+}
 
-.mm-state { font-size: 11.5px; color: var(--faint); }
-.madmax.armed .mm-state { color: var(--danger); }
+.cl-switch[aria-checked="true"] .cl-knob {
+  transform: translateX(18px);
+  background: var(--accent);
+}
 
-/* Takes the slack and truncates first, so the button can never be pushed out of
-   the panel on a narrow window. */
-.mm-rules {
-  flex: 1;
-  min-width: 0;
-  text-align: right;
+.cl-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.cl-rules { margin: 0 0 8px; font-size: 11.5px; }
+
+/* A coverage problem outranks everything else on this panel: it is the difference
+   between "nothing was posted" and "I was not listening". */
+#clState.warn { color: #d9a13b; }
+
+.cl-room { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; }
+
+.cl-week {
   font-size: 11px;
-  color: var(--faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mm-btn {
-  flex: none;
-  height: 27px;
-  padding: 0 13px;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--line);
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
   color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.mm-btn:hover { color: var(--text); background: var(--panel-2); }
+.cl-week.full { color: #d9a13b; border-color: color-mix(in srgb, #d9a13b 45%, var(--line)); }
 
-.mm-btn.live {
-  background: var(--danger);
-  color: #fff;
-  box-shadow: none;
-}
-
-.mm-btn.live:hover { background: var(--danger); opacity: 0.88; color: #fff; }
-
-/* A running log, because a bot you cannot see is a bot you cannot trust. */
-.mm-log {
-  margin: 0;
-  padding: 4px 18px 12px;
-  list-style: none;
-  border-top: 1px solid var(--line);
-}
-
-.mm-line {
-  display: flex;
-  gap: 12px;
-  padding: 4px 0;
-  font-size: 11.5px;
-  color: var(--faint);
-}
-
-.mm-when { flex: none; opacity: 0.7; }
-.mm-kind { flex: none; min-width: 58px; }
-.mm-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.mm-line.claimed .mm-kind { color: var(--accent); }
-.mm-line.failed .mm-kind, .mm-line.error .mm-kind { color: var(--danger); }
-.mm-line.armed .mm-kind, .mm-line.disarmed .mm-kind { color: var(--muted); }
-
-/* ---------- arm sheet ---------- */
-
-.arm-sheet { max-width: 360px; }
-
-.arm-rules {
-  margin: 0 0 12px;
+.cl-log {
+  margin: 10px 0 0;
   padding: 0;
   list-style: none;
-  font-size: 11.5px;
-  color: var(--muted);
-}
-
-.arm-rules li {
-  padding: 5px 0 5px 14px;
-  position: relative;
-  border-bottom: 1px solid var(--line);
-}
-
-.arm-rules li:last-child { border-bottom: none; }
-.arm-rules li::before { content: '\2713'; position: absolute; left: 0; color: var(--accent); }
-
-.arm-warn {
-  margin: 0 0 14px;
-  padding: 9px 11px;
-  border-radius: 8px;
-  background: var(--warn-bg);
-  color: var(--warn);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
-
-
-
-/* ---------- slide to arm ---------- */
-
-.slide-arm {
-  position: relative;
-  height: 46px;
-  margin-bottom: 14px;
-  border-radius: 11px;
-  background: var(--panel-2);
-  box-shadow: inset 0 0 0 1px var(--line);
-  overflow: hidden;
-}
-
-/* Grows behind the knob so the gesture leaves a visible trail. */
-.slide-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 0;
-  background: color-mix(in srgb, var(--danger) 22%, transparent);
-  transition: background 0.2s ease;
-}
-
-.slide-arm.ready .slide-fill { background: color-mix(in srgb, var(--danger) 42%, transparent); }
-
-/* Sheen sweeping left to right, the "slide to unlock" cue. */
-.slide-label {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding-left: 34px;
-  font-size: 12px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  background: linear-gradient(90deg, var(--faint) 34%, var(--text) 50%, var(--faint) 66%);
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: sheen 2.4s linear infinite;
-  transition: opacity 0.15s ease;
-  pointer-events: none;
-}
-
-@keyframes sheen {
-  from { background-position: 110% 0; }
-  to { background-position: -110% 0; }
-}
-
-/* The real control, invisible except for its knob. */
-.slide-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  background: transparent;
-  cursor: grab;
-}
-
-.slide-input:active { cursor: grabbing; }
-
-.slide-input::-webkit-slider-thumb {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 40px;
-  height: 40px;
-  border-radius: 9px;
-  background: var(--danger) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 5l7 7-7 7M13 5l6 7-6 7'/%3E%3C/svg%3E") center / 17px no-repeat;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
-}
-
-.slide-input::-moz-range-thumb {
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 9px;
-  background: var(--danger);
-}
-
-.slide-arm.ready .slide-input::-webkit-slider-thumb { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 30%, transparent); }
-
-/* Which wire found the shift. Push and poll sit side by side because knowing
-   the fast path is alive is the difference between racing and hoping. */
-.mm-wires {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-  padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
 }
 
-.mm-wire { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-
-.mm-wire-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--faint);
-  flex: none;
+.cl-line {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  padding: 3px 0;
+  align-items: baseline;
 }
 
-.mm-wire.live .mm-wire-dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+.cl-when { flex: none; opacity: 0.7; }
+.cl-kind { flex: none; min-width: 56px; color: var(--muted); }
+.cl-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
 }
 
-.mm-wire.warn .mm-wire-dot { background: #d9a13b; }
+.cl-line.claimed .cl-kind { color: var(--accent); }
+.cl-line.gone .cl-kind, .cl-line.error .cl-kind { color: var(--danger); }
+.cl-line.gap .cl-kind { color: #d9a13b; }
 
-.mm-wire-name { color: var(--fg); letter-spacing: 0.06em; }
-.mm-wire.off .mm-wire-name { color: var(--faint); }
-.mm-wire-note { color: var(--faint); }
-
-/* Pushed to the far end so the counts read as a summary, not another wire. */
-.mm-tallies { margin-left: auto; font-size: 11px; color: var(--faint); }
-
-/* A coverage gap outranks the tallies: it is the difference between "nothing
-   was posted" and "I was not looking". */
-.mm-tallies.warn { color: #d9a13b; }
+/* Claim is a real action now, not a link out. */
+button.claim { border: none; font-family: inherit; cursor: pointer; }
+button.claim:disabled { cursor: default; opacity: 0.75; }
+.claim.done { background: var(--accent); color: #fff; opacity: 1; }
+.claim.refused { background: var(--danger); color: #fff; }

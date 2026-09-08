@@ -14,35 +14,22 @@
   },
   "weeklyHourCap": null,
   "_weeklyHourCap": "Warn when a week goes over this many hours. null disables it. On-campus student jobs are often capped at 20 during term.",
-
   "_pay": "Remove this block to hide the pay panel. nightFrom/nightTo are start hours, so 0-6 means a shift starting at midnight bills at the night rate. taxRate is your own effective withholding, taken off a real payslip, not a guess.",
   "pay": null,
-
-  "_madmax": "The armed auto-claimer. checkOnly asks the server whether a shift is claimable and logs the answer WITHOUT taking it, which is how to prove the claim path safely; set it false to claim for real. intervalSeconds is floored at 30 because that is the rate the real SwapBoard polls at. stationWeights biases the optimiser: 1.2 makes an hour at that post worth 1.2 of an hour elsewhere, and it maximises total hours when left empty.",
-  "madmax": {
-    "checkOnly": true,
-    "intervalSeconds": 30,
-    "maxHoursPerWeek": 20,
-    "minNoticeMinutes": 180,
-    "minGapMinutes": 480,
-    "skipOverlaps": true,
-    "blackoutDates": [],
-    "stationWeights": {}
-  },
-
-  "_mail": "Push instead of polling, and the only thing that can catch a shift that lives for a second. IMAP IDLE wakes the claimer the moment your mail server accepts a TeamWork notification, and it costs zero swapboard requests so it cannot trip the rate limit. Set host/user for wherever the notifications land (imap.gmail.com, or outlook.office365.com for a university account) and store the password the same way as the TeamWork one: security add-generic-password -s tmwork-rso -a YOUR_EMAIL -w. Gmail needs an app password, not your login password. Leave triggerSubject empty until you have seen the real subject line, because empty means every TeamWork mail triggers a look, which is the safe default. Delete this block to run on polling alone.",
-  "mail": {
-    "host": "imap.gmail.com",
-    "port": 993,
-    "user": "you@example.com",
-    "mailbox": "INBOX",
-    "from": "tmwork",
-    "triggerSubject": ""
-  },
-
   "_maps": "Station names are turned into Google Maps searches. campus is appended to sharpen the search. Put an override in stations only when Google resolves a name badly, e.g. \"INV Northwest 1\": \"42.3406,-71.0890\".",
   "maps": {
     "campus": "",
     "stations": {}
+  },
+  "_claim": "Claiming from the TeamWork alert email. checkOnly runs the whole path and asks TeamWork whether the shift is claimable instead of taking it, which is how to prove the plumbing without committing to work; set it false to claim for real. minNoticeMinutes is how far out the shift must start: measured over 56 real alerts, 180 keeps 48 and skips 8, all of which were genuinely short notice (60 to 138 minutes). It and blackoutDates are decided from the email alone, so a shift failing them costs no board read. There is no minimum-duration rule because every real shift was 4h, 4.25h, 4.5h or 8h, so one could never fire.",
+  "claim": {
+    "checkOnly": true,
+    "keepAwake": true,
+    "keepWarm": true,
+    "minNoticeMinutes": 180,
+    "maxHoursPerWeek": 20,
+    "minGapMinutes": 0,
+    "skipOverlaps": true,
+    "blackoutDates": []
   }
 }

@@ -11,6 +11,9 @@ Reverse engineered from a recorded browser session. Here so future me can fix it
 | `server.mjs` | Local server + JSON API. |
 | `public/` | The UI. Vanilla HTML/CSS/JS, no build step. |
 | `recon.mjs` | Traffic recorder, for when the site changes. |
+| `alert.mjs` | Parses the TeamWork alert email. Tested against a real one. |
+| `claimer.mjs` | Alert in, one board read, one claim out. |
+| `mail-alert.applescript` | The Apple Mail rule that fires the moment an alert lands. |
 
 ## Auth
 
@@ -141,6 +144,116 @@ Three separate numbers, and only two are server-side.
 `data-expiry="30"` and `data-delay="1500"` on `#page-swapboard-container` are
 not those limits. `expiry` is a 30 *second* sessionStorage cache TTL and `delay`
 is a spinner delay. The numbers coincide; the meanings do not.
+
+## The alert email
+
+`mailer@schedulesource.com`, subject `TeamWork ALERT: SHIFT AVAILABLE`. Captured
+2026-08-13:
+
+```
+SHIFT AVAILABLE:
+
+[RSO Boston][Hamper Station Duty]
+Thursday, 08/13/2026  12:45pm - 5:15pm
+
+BY: Mehta, Aryan
+
+--- TEAMWORK ---
+https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Ftmwork.net%2F&...
+```
+
+What it does not carry matters more than what it does. **No shift id, no LocId,
+and the only link is the site root**, so the mail cannot be claimed from
+directly. It does pin the shift exactly, so one `swapboard?date=&range=day` turns
+the description into the `Id` and `LocId` that `quick-claim` needs. One request
+per alert, aimed at one day. Nothing polls.
+
+Details that cost a rewrite if forgotten:
+
+- The date line is `MM/DD/YYYY` with **two spaces** before the time, and the times
+  come from the same formatter as everything else, so `8pm` and `12:45pm` both
+  turn up. Outlook sends HTML to some clients with those spaces as `&nbsp;`.
+- `8pm - 12am` means the end is the **next day**. Read as-is it is a
+  negative-length shift and every guardrail downstream compares against nonsense.
+- Outlook rewrites every link through SafeLinks, so if TeamWork ever does put an
+  id in a link it arrives percent-encoded inside `url=`. `unwrapSafeLink` is there
+  for that day, and that day removes the board read entirely.
+- That mail gave **135 minutes of notice** (sent 10:30, shift at 12:45). The old
+  `minNoticeMinutes: 180` would have thrown away exactly the shift this feature
+  exists to catch. The default is 60 now.
+
+### What a claim costs, and where it went
+
+Measured against the live site on 2026-08-23:
+
+```
+sign-in (4 sequential requests)     855ms
+board read, cold socket             154ms   (209ms after 6s idle)
+board read, warm socket              65ms
+claim write, warm socket            ~55ms
+```
+
+Sign-in dominated everything, and it was on the critical path of every claim.
+The session was expired proactively after five minutes and alerts arrive far
+less often than that, so essentially every alert paid the 855ms before it even
+looked at the board.
+
+Three changes, all measured rather than assumed:
+
+- **No proactive session expiry.** Use it until the server rejects it; the
+  `looksExpired` retry already covers that case.
+- **A keeper pings `api/employee/preferences` every 45s.** That renews the
+  session server side and holds the connection open. Their load balancer closes
+  an idle socket at about 60s, so 45s is inside it with margin. Verified: a ping
+  after a full cycle reports `warm: true` and costs 78ms against 943ms cold.
+- **`http.mjs` instead of `fetch`.** undici drops an idle socket after ~3s and
+  does not expose the dispatcher, so every request was paying TCP and TLS again.
+
+End to end, alert in to verdict out, measured over five runs on the live server:
+**99, 100, 113, 122, 151ms**. Before: 855 + ~200 = over a second.
+
+The page poll also stands down while a claim is in flight. Both read
+`api/shift/swapboard`, which refuses anything inside 1.5s, so they queue behind
+one gate and a page poll landing first would make the claim wait out the spacing.
+
+None of this changes who wins a contested race, because the 12s of mail delay
+below dwarfs all of it. What it changes is the shift that is still sitting there:
+a claim now lands about a second sooner, and the failure mode where a cold
+session made it nearly two seconds is gone.
+
+### How late the mail is
+
+Measured 2026-08-23 over all 56 alerts sitting in Apple Mail, comparing each
+message's own `Date` header against when it was delivered:
+
+```
+min 3s   median 12s   mean 13.2s   p90 19s   p95 26s   max 38s
+```
+
+The header chain says where it goes:
+
+```
+Date:                             13 Aug 2026 09:11:56 -0600   schedulesource sends
+X-MS-Exchange-...-OriginalArrivalTime: 13 Aug 2026 15:12:05    Microsoft receives   +9s
+X-MS-Exchange-Transport-EndToEndLatency: 00:00:03.16           delivered            +3s
+Received: from mail pickup service by aws-us2.schedulesource.com with Microsoft SMTPSVC
+```
+
+So most of it is schedulesource's own relay, not Microsoft's. That last line is an
+IIS pickup directory: TeamWork writes a file and a service collects it later. None
+of that is reachable from here, so **12s is a floor on this design, not something
+to optimise.** On top of it sits whatever delay there is between the shift being
+released and the mail being generated, which is invisible from outside.
+
+What that means, plainly: a bot polling `api/shift/swapboard` at its 1.5s floor
+sees a posting in about 0.75s on average. This route sees it in 12. It takes every
+shift nobody else is actively racing, and loses every shift somebody is. That is
+the honest ceiling, and no amount of work on our side moves it.
+
+The parser is proven against all 56, not the one that was transcribed: 56/56, and
+the real bodies cover `20:00-00:00` (the midnight rollover), `08:45-13:00` and
+`12:45-17:15` (off-hour times with minutes), and station names carrying a `(2)`
+suffix that matches the board's `StnName` exactly.
 
 ## Not built
 

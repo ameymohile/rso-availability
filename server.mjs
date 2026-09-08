@@ -7,51 +7,61 @@
 
 import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
+import { connect, loadTemplate, readWeek, saveAndVerify, loadShifts, loadOpenShifts, loadBoardForDate, locateStation, claimShift, checkClaim, SHIFT_BLOCKS } from './tmwork.mjs';
 import { buildCalendar } from './calendar.mjs';
 import { syncCalendar } from './calendar-sync.mjs';
-import { createMadMax } from './madmax.mjs';
 import { notify } from './notify.mjs';
-import { createMailWatch } from './mailwatch.mjs';
 import { createGate } from './gate.mjs';
 import { createHeartbeat } from './heartbeat.mjs';
 import { createAwake } from './awake.mjs';
-import { keychainPassword } from './tmwork.mjs';
+import { createClaimer } from './claimer.mjs';
 
 const PORT = Number(process.env.PORT ?? 8123);
 const HOST = '127.0.0.1';
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
 const config = JSON.parse(readFileSync(new URL('./config.json', import.meta.url)));
 
-// Sign-in costs seconds, so hold it briefly. Short enough that a server-side
-// expiry means one slow request, not a wedged UI.
-const SESSION_TTL_MS = 5 * 60 * 1000;
+// Sign-in is four sequential requests: /signin, the POST, /emp/, then the token
+// scrape. Measured against the live site: **855ms**. The board read that follows
+// it is 65ms on a warm socket. So the sign-in was seven times the cost of the
+// work, and it sat squarely on the claim path.
+//
+// It used to be worse than it looks. The session was expired proactively after
+// five minutes, and alerts arrive far less often than that, so essentially every
+// claim paid the 855ms. The fix is not a longer timeout, it is to stop putting
+// sign-in on the critical path at all:
+//
+//   - No proactive expiry. The session is used until the server rejects it, and
+//     `looksExpired` already retries that case.
+//   - A keeper pings a cheap endpoint on a timer. That renews the session server
+//     side, holds the TCP and TLS connection open so the next request skips both
+//     handshakes, and discovers a dead session on its own time rather than on the
+//     one request that matters.
+const SESSION_PING_MS = 45 * 1000;
+// Their load balancer closes an idle connection at about 60s, so the ping has to
+// be inside that or the socket is cold again regardless of the session.
+const PING_PATH = '/api/employee/preferences';
+
 let cached = null;
+let signingIn = null;
+let lastPing = null;
 
 async function getSession() {
-  if (cached && Date.now() - cached.at < SESSION_TTL_MS) return cached.session;
-  const session = await connect(config);
-  cached = { session, at: Date.now() };
-  return session;
-}
+  if (cached) return cached.session;
 
-// Signing in is four sequential requests: /signin, the POST, /emp/, then the
-// token scrape. That is a second or more, and a lazy session meant it landed in
-// front of whichever sweep happened to cross the TTL, delaying both the
-// detection and the claim on that sweep. Rotating an ageing session after a
-// sweep instead pays the cost in the idle gap. Only while armed, so an unused
-// server is not signing in on a timer.
-async function rotateSessionIfAgeing() {
-  if (!cached || Date.now() - cached.at < SESSION_TTL_MS * 0.8) return;
-  try {
-    cached = { session: await connect(config), at: Date.now() };
-  } catch {
-    // Better to make the next caller sign in than to hold a broken session.
-    cached = null;
-  }
+  // Collapse concurrent cold starts. Two alerts arriving together would each
+  // start their own four-request sign-in otherwise.
+  signingIn ??= connect(config)
+    .then((session) => {
+      cached = { session, at: Date.now() };
+      return session;
+    })
+    .finally(() => { signingIn = null; });
+
+  return signingIn;
 }
 
 // Only an expired session is worth retrying. Retrying anything else doubles the
@@ -67,6 +77,26 @@ async function withSession(fn) {
     if (!looksExpired(err)) throw err;
     cached = null;
     return fn(await getSession());
+  }
+}
+
+// Keeps the session and the connection warm so a claim pays for neither.
+//
+// One request every 45s to an endpoint with no rate limit on it, which is the
+// price of not paying 855ms plus two TLS handshakes on the request that decides
+// whether a shift is yours. `claim.keepWarm: false` turns it off.
+async function pingSession() {
+  const at = Date.now();
+  try {
+    const session = await getSession();
+    await session.getJson(PING_PATH);
+    lastPing = { at: new Date(at).toISOString(), ms: Date.now() - at, warm: session.warm, ok: true };
+  } catch (err) {
+    // Drop it and let the next ping sign in again. Doing that here, on a timer,
+    // is the entire point: the alternative is discovering it mid-claim.
+    if (looksExpired(err)) cached = null;
+    lastPing = { at: new Date(at).toISOString(), ms: Date.now() - at, ok: false, why: err.message };
+    console.warn(`session ping failed: ${err.message}`);
   }
 }
 
@@ -120,92 +150,26 @@ async function getShifts({ allowStale = false } = {}) {
   return refreshShifts();
 }
 
-// Held only while armed. See awake.mjs: this stops idle sleep, which is what was
-// making an ARMED panel meaningless, but it cannot stop lid-close sleep.
-const awake = createAwake({
-  onEvent: (event) => {
-    console.log(`awake: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
-    if (event.kind === 'awake-lost') {
-      madmax.note({ kind: 'error', why: 'lost the wake assertion, the machine can sleep again' });
-    }
-  },
-});
-
-// Armed state lives here and nowhere else, so restarting the server disarms it.
-const madmax = createMadMax({
-  config: config.madmax ?? {},
-  intervalMs: (config.madmax?.intervalSeconds ?? 45) * 1000,
-  loadBoard: () => boardShifts(),
-  loadMine: async () => (await getShifts({ allowStale: true })).all,
-  claim: async (shift) => {
-    const result = await swapWrite((s) => claimShift(s, shift));
-    // What I hold just changed, so the 5 minute cache is wrong now. Leaving it
-    // meant the next sweep planned against a schedule missing the shift it had
-    // just taken, and claimed straight through the weekly cap.
-    shiftCache = null;
-    return result;
-  },
-  check: (shift) => swapWrite((s) => checkClaim(s, shift)),
-  afterSweep: rotateSessionIfAgeing,
-  onArmChange: (armed) => (armed ? awake.hold() : awake.release()),
-  onEvent: (event) => {
-    console.log(`madmax: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
-    appendJsonl(MADMAX_LOG, event);
-
-    const when = event.start ? new Date(event.start).toLocaleString(undefined, {
-      weekday: 'short', hour: 'numeric', minute: '2-digit',
-    }) : '';
-
-    if (event.kind === 'claimed') {
-      notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
-    }
-
-    // A shift was on the board and the claim did not land. Somebody else got
-    // there first, or the server refused it, and the reason is in the event.
-    if (event.kind === 'failed') {
-      notify('Claim failed', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? 'unknown'}`, { sound: 'Sosumi' });
-    }
-
-    if (event.kind === 'checked') {
-      notify('Claim check (nothing taken)', `${event.station ?? 'Shift'} · ${when}: ${event.why ?? ''}`, { sound: 'Ping' });
-    }
-  },
-});
-
-// Push, not polling. A shift that lives a second is invisible to any safe poll
-// rate, so the interval becomes a safety net and this becomes the fast path.
-const mailWatch = createMailWatch({
-  config: config.mail ?? {},
-  password: config.mail?.user ? keychainPassword(config.mail.user, { optional: true }) : null,
-  onTrigger: (reason) => madmax.trigger(reason),
-  onEvent: (event) => {
-    if (event.kind === 'mail-status') return;
-    console.log(`mail: ${event.kind}${event.subject ? ` ${event.subject}` : ''}${event.why ? ` (${event.why})` : ''}`);
-    // Kept even when it does not trigger. If a shift is posted and no mail
-    // arrives, this file is the evidence that email is not the route.
-    appendJsonl(MAIL_LOG, { at: new Date().toISOString(), ...event });
-  },
-});
-
 // Closing the lid suspends this process instead of killing it, so launchd sees
-// nothing wrong and never restarts it, and on wake the sweep resumes as if
-// nothing happened. Saying so out loud matters more than it sounds: a panel
-// reading "swept just now" after a night asleep claims coverage that never
-// existed, and the decision to trust the bot depends on knowing the difference.
+// nothing wrong and never restarts it. Saying so out loud matters more than it
+// sounds: a page reading "checked just now" after a night asleep claims coverage
+// that never existed.
 let lastGap = null;
 
 const heartbeat = createHeartbeat({
   onGap: (gapMs) => {
     const minutes = Math.round(gapMs / 60000);
     lastGap = { at: new Date().toISOString(), minutes };
-
-    madmax.note({ kind: 'gap', why: `not running for ~${minutes} min (lid closed or asleep). Shifts posted then were missed.` });
     console.warn(`heartbeat: ${minutes} min gap, process was suspended`);
 
-    // The socket did not survive the suspend even though it may still look open,
-    // so rebuild it now rather than waiting out its timeout with the fast path
-    // quietly dead.
-    mailWatch.reconnect('woke after a gap');
+    // Written where the claims are, because "nothing was posted" and "I was not
+    // awake to hear about it" look identical otherwise, and only one of them is
+    // worth doing something about.
+    appendJsonl(CLAIM_LOG, {
+      at: new Date().toISOString(),
+      kind: 'gap',
+      why: `asleep or suspended for ~${minutes} min. Alerts that arrived then were missed.`,
+    });
   },
 });
 
@@ -244,7 +208,6 @@ function noteSwapRefusal(err) {
     console.error('could not persist the lockout:', writeErr.message);
   }
 
-  madmax.disarm();
   notify('Swap list locked out', 'TeamWork disabled the board. Resting 31 minutes.', { sound: 'Sosumi' });
   console.error('swapboard locked out, resting 31 min');
 }
@@ -258,14 +221,19 @@ const restingError = () =>
 // other. See gate.mjs for why this is serialised and not merely rate limited.
 const boardGate = createGate({ spacingMs: 1600 });
 
+// The last board actually read, so a caller that has to be turned away can be
+// given something true and dated rather than nothing.
+let lastBoard = { shifts: [], at: null };
+
 async function boardShifts() {
   if (swapLocked()) throw restingError();
 
   try {
     const open = await boardGate.run(() => withSession((s) => loadOpenShifts(s)));
+    lastBoard = { shifts: open, at: new Date().toISOString() };
     // Every board read feeds the log, not just the ones the UI asks for. This
-    // used to hang off the /api/open-shifts route, so the frequent reads (Mad
-    // Max sweeping) recorded nothing and the log stayed almost empty.
+    // used to hang off the /api/open-shifts route, so the frequent reads
+    // recorded nothing and the log stayed almost empty.
     await noteBoardChange(open);
     return open;
   } catch (err) {
@@ -274,9 +242,22 @@ async function boardShifts() {
   }
 }
 
-// Claiming and checking are swap endpoints too, so they sit behind the same gate.
+// The claimer's read. Same gate and same breaker as the page's, because it is the
+// same rate-limited endpoint, but one day rather than the horizon.
+async function boardForDate(date) {
+  if (swapLocked()) throw restingError();
+
+  try {
+    return await boardGate.run(() => withSession((s) => loadBoardForDate(s, date)));
+  } catch (err) {
+    noteSwapRefusal(err);
+    throw err;
+  }
+}
+
 async function swapWrite(fn) {
   if (swapLocked()) throw restingError();
+
   try {
     return await withSession(fn);
   } catch (err) {
@@ -288,8 +269,145 @@ async function swapWrite(fn) {
 // JSONL because appending a line cannot corrupt the ones before it.
 const logPath = (name) => fileURLToPath(new URL(`./${name}`, import.meta.url));
 const HISTORY = logPath('history.jsonl');
-const MADMAX_LOG = logPath('madmax-log.jsonl');
-const MAIL_LOG = logPath('mail-log.jsonl');
+const CLAIM_LOG = logPath('claim-log.jsonl');
+
+// A claimer on a sleeping laptop is not a claimer. The alert arrives by Mail
+// rule, and a Mail rule does not run while the machine is asleep: the mail is
+// simply there when it wakes, minutes or hours late, and the shift is long gone.
+// Measured on this machine before anything held it awake: 434 minutes asleep out
+// of a 421 minute window.
+//
+// So the assertion is held for as long as claiming is enabled, and no longer.
+// `claim.keepAwake: false` turns it off for anyone who would rather have the
+// battery. It cannot beat closing the lid, which ignores power assertions
+// outright, so a closed lid still means missed shifts.
+const awake = createAwake({
+  reason: 'RSO claimer live',
+  onEvent: (event) => {
+    console.log(`awake: ${event.kind}${event.why ? ` (${event.why})` : ''}`);
+    if (event.kind === 'awake-lost') {
+      appendJsonl(CLAIM_LOG, {
+        at: new Date().toISOString(),
+        kind: 'error',
+        why: 'lost the wake assertion, the machine can sleep through alerts now',
+      });
+    }
+  },
+});
+
+// Paused state lives on disk, not in memory.
+//
+// The old Mad Max panel deliberately forgot it was armed when the server
+// restarted, because arming a bot was the dangerous direction. Here it is the
+// other way round: config says claim, so forgetting a pause would quietly turn
+// claiming back on the next time launchd restarted this, and "I switched it off"
+// would silently stop being true.
+const PAUSE_FILE = fileURLToPath(new URL('./.claim-paused', import.meta.url));
+
+let paused = (() => {
+  try {
+    readFileSync(PAUSE_FILE, 'utf8');
+    console.warn('claimer: PAUSED, from a previous session');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function setPaused(next) {
+  paused = Boolean(next);
+  try {
+    if (paused) writeFileSync(PAUSE_FILE, new Date().toISOString());
+    else unlinkSync(PAUSE_FILE);
+  } catch (err) {
+    // Say so rather than reporting a state that will not survive a restart.
+    console.error(`could not persist the pause: ${err.message}`);
+  }
+
+  // Nothing to stay awake for while paused, and holding a laptop awake for a
+  // claimer that is switched off is the definition of a tool being rude.
+  if (paused) awake.release();
+  else if (config.claim?.keepAwake !== false) awake.hold();
+
+  console.log(`claimer: ${paused ? 'PAUSED' : 'LIVE'}`);
+
+  // Awaited, not fired and forgotten. The route replies with the log it reads
+  // back from this file, so an unawaited append meant the panel could render the
+  // toggle without the line recording that very toggle, which reads as the switch
+  // not having worked.
+  return appendJsonl(CLAIM_LOG, {
+    at: new Date().toISOString(),
+    kind: paused ? 'paused' : 'resumed',
+    why: paused ? 'switched off from the panel' : 'switched on from the panel',
+  }).then(() => paused);
+}
+
+// Hours already booked per week against the cap, so the panel can say "on, but
+// this week is full" rather than leaving that to be inferred from a skipped
+// alert. Same week boundary and same whole-minute arithmetic as the rule itself.
+function roomByWeek(shifts) {
+  const cap = config.claim?.maxHoursPerWeek;
+  const weeks = new Map();
+
+  for (const shift of shifts ?? []) {
+    const start = new Date(shift.start);
+    if (Number.isNaN(start.getTime())) continue;
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - start.getDay());
+    const key = start.toISOString().slice(0, 10);
+    weeks.set(key, (weeks.get(key) ?? 0) + Math.round((Number(shift.hours) || 0) * 60));
+  }
+
+  return [...weeks]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([week, minutes]) => ({
+      week,
+      booked: Number((minutes / 60).toFixed(2)),
+      room: cap == null ? null : Number((cap - minutes / 60).toFixed(2)),
+    }));
+}
+
+// An alert arrives, one day of the board is read, and the shift it named is
+// claimed. No timer, no polling: if no mail arrives, this does nothing at all.
+const claimer = createClaimer({
+  config: config.claim ?? {},
+  // Checked at the moment the mail lands rather than captured at startup, so the
+  // switch takes effect on the next alert and not on the next restart.
+  isPaused: () => paused,
+  loadBoard: (date) => boardForDate(date),
+  loadMine: async () => (await getShifts({ allowStale: true })).all,
+  claim: async (shift) => {
+    const result = await swapWrite((s) => claimShift(s, shift));
+    // What I hold just changed, so the five minute cache is wrong now. Leaving
+    // it stale let the next alert plan against a schedule missing the shift just
+    // taken, and claim straight through the weekly cap.
+    shiftCache = null;
+    return result;
+  },
+  check: (shift) => swapWrite((s) => checkClaim(s, shift)),
+  onEvent: (event) => {
+    console.log(`claim: ${event.kind}${event.station ? ` ${event.station}` : ''}${event.why ? ` (${event.why})` : ''}`);
+    appendJsonl(CLAIM_LOG, event);
+
+    const when = event.start
+      ? new Date(event.start).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+      : '';
+
+    if (event.kind === 'claimed') {
+      notify('Shift claimed', `${event.station ?? 'Shift'} · ${when}`, { sound: 'Glass' });
+    }
+
+    // Losing a race is the expected outcome sometimes, but it should never be
+    // silent: it is the only signal that the email is arriving too late to win.
+    if (event.kind === 'gone') {
+      notify('Lost the race', `${event.station ?? 'Shift'} · ${when} was already taken`, { sound: 'Sosumi' });
+    }
+
+    if (event.kind === 'error') {
+      notify('Claim failed', `${event.station ?? 'Shift'} · ${when}: ${event.why}`, { sound: 'Sosumi' });
+    }
+  },
+});
 
 // Logs are a nicety. Never fail real work because one could not be written.
 async function appendJsonl(file, entry) {
@@ -300,9 +418,12 @@ async function appendJsonl(file, entry) {
   }
 }
 
-async function readHistory(limit = 20) {
+// Newest first. Used for both the availability history and the claim log, which
+// are the same shape: append-only JSONL where a bad line must not lose the good
+// ones around it.
+async function readJsonl(file, limit = 20) {
   try {
-    const text = await readFile(HISTORY, 'utf8');
+    const text = await readFile(file, 'utf8');
     return text
       .split('\n')
       .filter(Boolean)
@@ -314,6 +435,8 @@ async function readHistory(limit = 20) {
     return [];
   }
 }
+
+const readHistory = (limit = 20) => readJsonl(HISTORY, limit);
 
 // Logged only on change, so it answers "when do shifts appear" rather than
 // filling with a line a minute saying nothing happened.
@@ -378,7 +501,16 @@ function sendJson(res, status, payload) {
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString() || '{}');
+  const raw = Buffer.concat(chunks).toString();
+
+  // Form encoding as well as JSON, because the Mail rule posts with curl's
+  // --data-urlencode. That hands off an email body containing quotes, newlines
+  // and whatever else without an AppleScript-side JSON escaper to get wrong.
+  if (/application\/x-www-form-urlencoded/i.test(req.headers['content-type'] ?? '')) {
+    return Object.fromEntries(new URLSearchParams(raw));
+  }
+
+  return JSON.parse(raw || '{}');
 }
 
 async function serveStatic(req, res, pathname) {
@@ -465,11 +597,46 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/open-shifts' && req.method === 'GET') {
+      // Both this and a claim read `api/shift/swapboard`, and that endpoint
+      // refuses anything inside 1.5s, so they queue behind one gate. A page poll
+      // landing first would make the claim wait out the spacing. Nothing on this
+      // page is worth 1.6s of a claim, so while an alert is in flight the page
+      // gets the last board instead of a place in the queue.
+      if (claimer.state.handling > 0) {
+        return sendJson(res, 200, {
+          shifts: lastBoard.shifts.map(withPlace),
+          checkedAt: lastBoard.at,
+          held: 'a claim is in flight',
+        });
+      }
+
       const open = await boardShifts();
       return sendJson(res, 200, {
         shifts: open.map(withPlace),
         checkedAt: new Date().toISOString(),
       });
+    }
+
+    // One tap from the board. The refusal text is passed straight through
+    // because TeamWork's own reason ("Times open in schedule?") is more useful
+    // than anything this layer could invent.
+    if (pathname === '/api/claim' && req.method === 'POST') {
+      const { id, locId } = await readBody(req);
+      if (id == null || locId == null) {
+        return sendJson(res, 400, { error: 'claim needs id and locId' });
+      }
+
+      try {
+        const claimed = await claimShift(await getSession(), { id, locId });
+        // The roster just changed, so anything derived from it is stale.
+        shiftCache = null;
+        await appendJsonl(CLAIM_LOG, { at: claimed.claimedAt, kind: 'claimed', id, locId, via: 'one-tap', ms: claimed.ms });
+        notify('Shift claimed', `id ${id}`, { sound: 'Glass' });
+        return sendJson(res, 200, { claimed: true, ...claimed });
+      } catch (err) {
+        await appendJsonl(CLAIM_LOG, { at: new Date().toISOString(), kind: 'refused', id, locId, via: 'one-tap', why: err.message });
+        return sendJson(res, 200, { claimed: false, why: err.message });
+      }
     }
 
     // Availability is wiped weekly, so "what I had last time" is the common want.
@@ -482,16 +649,54 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { history: await readHistory() });
     }
 
-    if (pathname === '/api/madmax' && req.method === 'GET') {
+    // What the Mail rule posts. Deliberately dumb: it takes the message as it
+    // arrived and every decision about whether it means anything lives in
+    // alert.mjs, which is unit tested against a real one.
+    if (pathname === '/api/alert' && req.method === 'POST') {
+      const mail = await readBody(req);
+      const result = await claimer.onMail(mail);
+      return sendJson(res, 200, result);
+    }
+
+    if (pathname === '/api/claimer' && req.method === 'GET') {
+      // `awake`, `paused` and `lastGap` belong next to the rules, because whether
+      // this is actually listening matters more than what it would do if it were.
+      const { all } = await getShifts({ allowStale: true });
       return sendJson(res, 200, {
-        ...madmax.state, rules: config.madmax ?? {}, mail: mailWatch.status, lastGap, awake: awake.held,
+        ...claimer.state,
+        paused,
+        awake: awake.held,
+        lastGap,
+        // What the cap leaves, per week. "It is on but it will not take anything"
+        // is otherwise invisible until an alert is skipped.
+        room: roomByWeek(all),
+        // The hours are read from a five minute cache. A claim made *here*
+        // invalidates it, but a shift claimed by hand in TeamWork cannot, so the
+        // figures can lag and the panel should say so rather than look wrong.
+        roomAt: shiftCache?.at ? new Date(shiftCache.at).toISOString() : null,
+        // Whether the fast path is actually hot. A live claimer with a cold
+        // session pays 855ms before it reads anything, and that should be
+        // visible rather than inferred from a slow claim.
+        warm: { session: Boolean(cached), lastPing },
+        // From the file, not the in-memory copy. launchd restarts this, and a
+        // panel that forgets every claim on restart is a panel that cannot be
+        // used to answer "did it take anything last night".
+        log: await readJsonl(CLAIM_LOG, 12),
       });
     }
 
-    if (pathname === '/api/madmax' && req.method === 'POST') {
-      const { armed } = await readBody(req);
-      const state = armed ? madmax.arm() : madmax.disarm();
-      return sendJson(res, 200, { ...state, rules: config.madmax ?? {} });
+    if (pathname === '/api/claimer' && req.method === 'POST') {
+      const { paused: next } = await readBody(req);
+      await setPaused(next);
+      const { all } = await getShifts({ allowStale: true });
+      return sendJson(res, 200, {
+        ...claimer.state,
+        paused,
+        awake: awake.held,
+        lastGap,
+        room: roomByWeek(all),
+        log: await readJsonl(CLAIM_LOG, 12),
+      });
     }
 
     if (pathname === '/api/calendar/sync' && req.method === 'POST') {
@@ -524,22 +729,31 @@ server.listen(PORT, HOST, () => {
   // Warm the cache so the first calendar poll never waits on a cold sign-in.
   refreshShifts().catch((err) => console.error('warm-up failed,', err.message));
 
-  // Watching costs nothing at TeamWork, so it runs whether or not Mad Max is
-  // armed: the log then answers "does a posted shift even generate mail" long
-  // before anyone needs the trigger to work.
-  mailWatch.start();
-  const mail = mailWatch.status;
-  console.log(mail.configured
-    ? `mail watch: ${config.mail.user} via ${config.mail.host}`
-    : 'mail watch: not configured (see config.example.json "mail")');
-
   heartbeat.start();
+
+  // Live means live: nothing to arm, because the trigger is an email rather than
+  // a timer, so the only question is whether this process is awake to receive it.
+  if (config.claim?.keepAwake !== false) awake.hold();
+
+  if (config.claim?.keepWarm !== false) {
+    pingSession();
+    // Unref'd: keeping a session warm is not a reason to hold the process open.
+    setInterval(pingSession, SESSION_PING_MS).unref?.();
+  }
+
+  const rules = config.claim ?? {};
+  console.log(rules.checkOnly
+    ? 'claimer: CHECK ONLY, alerts are evaluated and nothing is taken'
+    : `claimer: LIVE, will claim shifts starting ${rules.minNoticeMinutes ?? 180}+ min out`
+      + `${rules.maxHoursPerWeek != null ? `, up to ${rules.maxHoursPerWeek}h a week` : ', with NO weekly cap'}`);
+  console.log(`claimer: machine held awake = ${awake.held}`);
 });
 
-// A watcher holding an IMAP socket would otherwise keep the process alive.
+// caffeinate is a child process, so it has to be let go deliberately or it
+// outlives the server that asked for it.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     awake.release();
-    mailWatch.stop().finally(() => process.exit(0));
+    process.exit(0);
   });
 }

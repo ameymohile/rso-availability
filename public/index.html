@@ -139,31 +139,22 @@
 
       <!-- Spans both columns. Hanging it under the left column made that side
            run far longer than the right and left a dead void at bottom right. -->
-      <!-- Arming starts a real bot, so it looks like one: monospace, live, and
-           impossible to switch on by brushing past it. -->
-      <div class="panel madmax" id="madmax">
-        <div class="mm-head">
-          <span class="mm-badge"><i></i>MAD&nbsp;MAX</span>
-          <span class="mm-state mono" id="mmState">disarmed</span>
-          <span class="mm-rules mono" id="mmRules"></span>
-          <button class="mm-btn" id="mmToggle" type="button">ARM</button>
+      <!-- The claimer runs whether or not this page is open, so this panel is a
+           switch and a status readout, not a control surface for a session. -->
+      <div class="panel claimer" id="claimer">
+        <div class="panel-head">
+          <h2>Shift claimer</h2>
+          <span class="head-actions">
+            <span class="note mono" id="clState">loading&hellip;</span>
+            <button class="cl-switch" id="clToggle" type="button" role="switch"
+                    aria-checked="false" aria-label="Claim shifts from alert emails">
+              <span class="cl-knob"></span>
+            </button>
+          </span>
         </div>
-        <!-- Two ways it finds a shift, shown side by side, because which one is
-             working is the difference between winning a race and not. -->
-        <div class="mm-wires" id="mmWires" hidden>
-          <div class="mm-wire" id="mmWirePush">
-            <span class="mm-wire-dot"></span>
-            <span class="mm-wire-name mono">PUSH</span>
-            <span class="mm-wire-note mono" id="mmPushNote">not configured</span>
-          </div>
-          <div class="mm-wire" id="mmWirePoll">
-            <span class="mm-wire-dot"></span>
-            <span class="mm-wire-name mono">POLL</span>
-            <span class="mm-wire-note mono" id="mmPollNote">idle</span>
-          </div>
-          <div class="mm-tallies mono" id="mmTallies"></div>
-        </div>
-        <ul class="mm-log mono" id="mmLog" hidden></ul>
+        <p class="note cl-rules mono" id="clRules"></p>
+        <div class="cl-room mono" id="clRoom"></div>
+        <ul class="cl-log" id="clLog"></ul>
       </div>
 
       <div class="panel" id="history" hidden>
@@ -191,28 +182,6 @@
       <div class="sheet-actions">
         <button class="sheet-btn" id="sheetCancel" type="button">Cancel</button>
         <button class="sheet-btn primary" id="sheetOk" type="button">OK</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="backdrop" id="armBackdrop" hidden>
-    <div class="sheet arm-sheet" role="dialog" aria-modal="true" aria-labelledby="armTitle">
-      <h2 class="sheet-title" id="armTitle">Arm Mad Max</h2>
-      <p class="sheet-note">
-        A bot will watch the SwapBoard and take shifts on your behalf, without asking each time.
-      </p>
-      <ul class="arm-rules mono" id="armRules"></ul>
-      <p class="arm-warn" id="armWarn"></p>
-      <!-- A full swipe, so arming takes a deliberate gesture rather than a click
-           that could land by accident. Keyboard reaches it with End. -->
-      <div class="slide-arm" id="slideArm">
-        <span class="slide-fill" id="armFill"></span>
-        <span class="slide-label mono" id="armLabel">slide to arm</span>
-        <input class="slide-input" id="armSlider" type="range" min="0" max="100" value="0"
-               aria-label="Slide all the way right to arm Mad Max">
-      </div>
-      <div class="sheet-actions">
-        <button class="sheet-btn" id="armCancel" type="button">Cancel</button>
       </div>
     </div>
   </div>

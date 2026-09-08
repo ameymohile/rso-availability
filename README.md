@@ -49,8 +49,66 @@ launchctl load   ~/Library/LaunchAgents/local.rso.availability.plist   # start
 tail -f server.log                                                    # watch
 ```
 
-Mad Max still disarms whenever the server restarts, so KeepAlive cannot bring an
-armed bot back to life. Arming is always a deliberate act.
+## Claiming a shift from the alert email
+
+TeamWork emails `mailer@schedulesource.com` / `TeamWork ALERT: SHIFT AVAILABLE`
+when somebody drops a shift, and the body names it exactly:
+
+```
+[RSO Boston][Hamper Station Duty]
+Thursday, 08/13/2026  12:45pm - 5:15pm
+```
+
+So there is nothing to poll. The mail arrives, one day of the board is read to
+turn that description into a shift id, and the shift is claimed. If no mail
+arrives, this sends no requests at all, which is why the swapboard lockout cannot
+happen any more.
+
+It needs the mail in Apple Mail, because a Mail rule can run a script the moment a
+message lands. The new Outlook for Mac cannot: Microsoft removed AppleScript from
+it, and its dictionary now reports zero accounts.
+
+**1. Add the account.** Mail > Add Account > Microsoft Exchange > Sign In. Let
+Microsoft's own sheet handle the password and MFA. Uncheck everything except Mail.
+
+**2. Add the rule.** Mail > Settings > Rules > Add Rule:
+
+| | |
+|---|---|
+| If **all** | From **contains** `mailer@schedulesource.com` |
+| | Subject **contains** `SHIFT AVAILABLE` |
+| Perform | **Run AppleScript** > `mail-alert.applescript` |
+
+`install.sh` copies the script to `~/Library/Application Scripts/com.apple.mail/`,
+which is the only place Mail will offer it from.
+
+**3. Leave Mail running, and awake.** Rules do not fire when Mail is quit, and
+Mail receives nothing while the machine is asleep. Add Mail to Login Items.
+Closing the lid sleeps the machine regardless of what is holding it awake, so a
+shut lid means missed shifts: see DEPLOY.md. The rule conditions above are duplicated in `alert.mjs` on purpose: a rule
+is a line in a plist that is easy to loosen by accident, and the mail body decides
+which shift gets claimed.
+
+The rules live in `config.json` under `claim`. `minNoticeMinutes` and
+`blackoutDates` are decided from the email alone, so a shift that fails one of them
+costs no board read at all.
+
+`minNoticeMinutes` is how far out the shift has to start. Over the 56 real alerts,
+`180` keeps 48 and skips 8, and all 8 were genuinely short notice: 60, 68, 72, 79,
+117, 118, 119 and 138 minutes. There is no minimum-duration rule, because every
+real shift was 4h, 4.25h, 4.5h or 8h.
+
+`claim.checkOnly` in `config.json` starts `true`. It runs the whole path and asks
+TeamWork whether the shift is claimable instead of taking it, so the first real
+alert proves the plumbing without committing you to a shift. Set it to `false`
+once you have seen one go through.
+
+Watch it work:
+
+```sh
+tail -f claim-log.jsonl        # what the claimer decided, and why
+tail -f /tmp/rso-mail-rule.log # whether the Mail rule fired at all
+```
 
 ## What it does
 
